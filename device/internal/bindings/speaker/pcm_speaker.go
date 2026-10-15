@@ -64,6 +64,7 @@ const primePeriods = 24
 var silencePeriod = make([]byte, periodBytes)
 
 type PcmSpeaker struct {
+	realtime realtimePlayback
 	// pcm is the playback device, found by name (pkg/board) in Init, and
 	// statusFile its substream's status in procfs.
 	pcm        board.PCMAddr
@@ -489,8 +490,15 @@ func (p *PcmSpeaker) silenceLoop() {
 		default:
 		}
 
+		owned, position := p.beginRealtimeCycle()
 		var voice, music []byte
-		if p.voice.ready(primePeriods) {
+		var marks []playbackMark
+		if owned {
+			voice, marks = p.realtime.render(periodSize)
+			if voice != nil {
+				p.voice.lastTakeNs.Store(time.Now().UnixNano())
+			}
+		} else if p.voice.ready(primePeriods) {
 			voice = p.voice.take()
 		} else if p.voice.playing {
 			p.report(p.voice.drained(), "voice")
@@ -581,9 +589,12 @@ func (p *PcmSpeaker) silenceLoop() {
 		}
 		meter.beforeWrite()
 		if err := p.pump(out); err != nil {
+			p.realtime.closeLocked()
+			p.realtime.mu.Unlock()
 			log.Printf("silenceLoop: pump error: %v", err)
 			return
 		}
+		p.endRealtimeCycle(position, marks)
 		meter.afterWrite()
 	}
 }
@@ -657,6 +668,9 @@ func toStereo(data []byte) []byte {
 // consumed a slot (rate-limiting to playback speed), or returns an error if
 // that loop has died — preventing an infinite block on a dead consumer.
 func (p *PcmSpeaker) PumpPeriod(data []byte) error {
+	if p.RealtimeOwned() {
+		return errRealtime
+	}
 	_, err := p.voice.pump(toStereo(data), len(data))
 	return err
 }

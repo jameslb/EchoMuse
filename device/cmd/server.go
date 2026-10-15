@@ -252,6 +252,7 @@ func main() {
 
 	// Private-listening sessions (docs/listening.md). The gate ignores any id
 	// that is not the open session, so a late message cannot touch a new one.
+	wireRealtime(ctx, controlClient, dataClient, pcmSpeaker, s.IsMuted)
 	controlClient.OnListen(func(kind string, session uint32) {
 		switch kind {
 		case "listen_ack":
@@ -267,6 +268,7 @@ func main() {
 			// wake it did not take (ceded, or refused): un-duck the music.
 			localDuck.Cancel()
 			if dataClient.CloseListen(session) {
+				pcmSpeaker.CloseRealtime()
 				log.Printf("[listen] session %d closed by the controller", session)
 			}
 		}
@@ -282,6 +284,7 @@ func main() {
 		dataClient.StartMic(false)
 	})
 	dataClient.OnListenEnd(func(e listen.End) {
+		pcmSpeaker.CloseRealtime()
 		localDuck.Cancel()
 		controlClient.SendListenEnd(e.Session, string(e.Reason))
 	})
@@ -460,6 +463,7 @@ func main() {
 	go pcmSpeaker.WatchJackRouting(ctx)
 
 	controlClient.OnDisconnected(func() {
+		pcmSpeaker.CloseRealtime()
 		// A Bluetooth link's results have nowhere to go now, and a
 		// controller that comes back starts from no links.
 		bleBridge.DropAll()
@@ -735,6 +739,11 @@ func main() {
 	// dump to confirm the sibling mute controls before touching them (see
 	// review C5 fix sequence) — deliberately not guessed at here.
 	s.SetMuteChangeCallback(func(muted bool) {
+		if muted {
+			// Retire output before a control-link report can block. Hardware
+			// mute and the existing microphone close remain authoritative.
+			pcmSpeaker.CloseRealtime()
+		}
 		controlClient.SendMuteState(muted)
 		if muted {
 			// Reported as muted rather than as the stream stopping, which

@@ -80,6 +80,7 @@ import em_api as api
 import em_pki
 import em_hostip
 import em_linkauth
+import em_realtime
 import em_pairing
 import em_config_types
 import em_dbwriter
@@ -429,6 +430,7 @@ class Device:
         control_ws: WebSocketServerProtocol,
     ):
         self.device_id    = device_id
+        self.realtime = None
         self.ip           = ip
         self.capabilities = capabilities
         self.control_ws   = control_ws
@@ -935,6 +937,10 @@ class Device:
         return waited
 
     async def send_data(self, data: bytes):
+        if self.realtime is not None and self.realtime.requires_handover and data and data[0] in (2,3):
+            # Native announcements/button turns take back the voice plane.
+            # Never let two pipelines write speech to the same speaker.
+            await self.realtime.handover()
         if self.data_ws is None and self._data_grace_left > 0:
             # Ride out a blip rather than discarding the rest of the audio.
             # The budget is spent down, so a device that never returns costs
@@ -3351,6 +3357,21 @@ def _wake_heard_at(device: Device, ev: dict) -> float:
     return _wake_dating(device, ev)[0]
 
 
+async def _realtime_claim(device: Device, message: dict) -> bool:
+    """Use the native validation/arbitration before a candidate route owns audio."""
+    ev = em_listen.parse_wake(message, asyncio.get_running_loop().time())
+    if ev is None or device.muted or not device.wake_word_enabled:
+        return False
+    if not esphome.can_serve_turn(device.device_id):
+        return False
+    if device.wake_arb_ms > 0 and len(_devices) > 1:
+        winner = await _claim_wake(device, _wake_heard_at(device, ev),
+                                   _device_level(ev), by="device",
+                                   over_playback=bool(ev.get("barge")))
+        return winner == device.device_id
+    return True
+
+
 async def _private_wake_turn(device: Device, ev: dict) -> None:
     """
     One wake from a privately listening Echo: arbitrate, then run the turn on
@@ -4537,6 +4558,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         # Link-security telemetry for the dashboard: True when this control
         # connection arrived over the TLS listener.
         device.secure = secure
+        device.realtime = em_realtime.attach(device, _realtime_claim)
         # Hydrate the observability panel's turn history from the persistent
         # turns table so it survives controller and device restarts.
         try:
@@ -4560,7 +4582,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         await device.send_control({
             "type": "ack",
             "device_id": device_id,
-            "features": CONTROLLER_FEATURES,
+            "features": CONTROLLER_FEATURES + (list(em_realtime.CAPABILITIES) if device.realtime else []),
             # The device's wall clock. An Echo has no RTC that survives a
             # power cut and boots reading 2010; under emOS nothing ever
             # corrects it, because bionic resolves through Android's property
@@ -4886,6 +4908,8 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                 #     arriving into an unknown state is different from
                 #     failing to record a statistic.
                 try:
+                    if device.realtime is not None and await device.realtime.control(msg):
+                        continue
                     if msg_type == "button":
                         await handle_button_event(device, msg)
 
@@ -5449,6 +5473,8 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
     finally:
         if device:
             # Above the stale check on purpose: per-connection state, and
+            if device.realtime is not None:
+                await device.realtime.close()
             # send_button_event resolves by device_id, so an orphaned timer
             # would fire a phantom tap at the replacement connection.
             device.tap_burst.cancel()
@@ -5655,6 +5681,8 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
                     em_ble_proxy.gatt_from_device(device.device_id, raw[1:])
                     continue
                 if raw and raw[0] == em_listen.FRAME_TYPE:
+                    if device.realtime is not None and await device.realtime.frame(raw):
+                        continue
                     # Private-listening session audio. The router holds it
                     # until its wake arrives, and drops it once the session
                     # is closed — never routed by a flag.
@@ -5750,6 +5778,8 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
     finally:
         if device:
             if device.data_ws is ws:
+                if device.realtime is not None:
+                    await device.realtime.close()
                 device.data_ws = None
                 device.data_ready.clear()
             _msg = (f"[data] Data connection closed: {device.device_id} — "
