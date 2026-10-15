@@ -105,7 +105,8 @@ type WifiChangeCallback func(ssid []byte, psk string)
 // ─── ControlClient ────────────────────────────────────────────────────────────
 
 type ControlClient struct {
-	deviceID string
+	realtimeCallback func(RealtimeCommand)
+	deviceID         string
 
 	ledCallback           LEDCallback
 	ledAnimCallback       LEDAnimCallback
@@ -598,7 +599,7 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 		// uses it to decide whether owwOnDevice is even offerable, so an older
 		// device shows "needs newer firmware" rather than a toggle that
 		// silently does nothing.
-		"capabilities": capabilities(),
+		"capabilities": c.registerCapabilities(),
 		// Why the ambient light sensor is or is not available. A capability
 		// list says WHAT a device has; when the answer is "nothing", nobody
 		// can tell an absent chip from an unbound driver without a shell
@@ -988,6 +989,13 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 			}
 			reply["type"] = "sendspin_token"
 			c.writeJSON(reply)
+
+		case "rt_open", "rt_flush", "rt_close":
+			if c.realtimeCallback != nil && c.HasFeature(RealtimeCapability) {
+				if command, err := DecodeRealtimeCommand(raw); err == nil {
+					c.realtimeCallback(command)
+				}
+			}
 
 		case "speaker_flush":
 			// Barge-in: controller detected the wake word during TTS

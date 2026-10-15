@@ -179,9 +179,11 @@ const (
 )
 
 type DataClient struct {
-	deviceID string
-	mic      mic.Subscribable
-	spk      speaker.Speaker
+	realtimeFrame        func([]byte) error
+	realtimeDisconnected func()
+	deviceID             string
+	mic                  mic.Subscribable
+	spk                  speaker.Speaker
 
 	bleGattCallback func([]byte)
 
@@ -507,6 +509,19 @@ func (d *DataClient) OpenListen(crossAt time.Time) (session uint32, ok bool) {
 func (d *DataClient) ListenOpen() bool {
 	_, open := d.listenGate.IsOpen()
 	return open
+}
+
+func (d *DataClient) ListenLease(session uint32) (time.Time, bool) {
+	if d.ListenState() != ListenLocal {
+		return time.Time{}, false
+	}
+	return d.listenGate.Lease(session, time.Now())
+}
+
+// Installed before Run. The disconnect callback must not call back into the
+// data client: it runs while retiring this exact data-link generation.
+func (d *DataClient) OnRealtime(frame func([]byte) error, disconnected func()) {
+	d.realtimeFrame, d.realtimeDisconnected = frame, disconnected
 }
 
 // AckListen and CloseListen apply the controller's listen_ack / listen_close.
@@ -836,6 +851,9 @@ func (d *DataClient) connect(ctx context.Context, baseURL string) error {
 
 		d.connMu.Lock()
 		if d.conn == conn {
+			if d.realtimeDisconnected != nil {
+				d.realtimeDisconnected()
+			}
 			d.conn = nil
 		}
 		d.connMu.Unlock()
@@ -912,6 +930,12 @@ func (d *DataClient) connect(ctx context.Context, baseURL string) error {
 			continue
 		}
 		switch data[0] {
+		case 0x09:
+			if d.realtimeFrame != nil {
+				if err := d.realtimeFrame(data); err != nil {
+					return err
+				}
+			}
 		case frameTypeSpeaker:
 			if len(data) > 1 && d.spk != nil {
 				if err := d.spk.PumpPeriod(data[1:]); err != nil {

@@ -115,6 +115,17 @@ func (c *Chain) SetActive(on bool) { c.active.Store(on) }
 // Active reports whether the chain is processing.
 func (c *Chain) Active() bool { return c.active.Load() }
 
+// DiscardHistory is called by the ALSA writer only, at an exclusive voice
+// route's flush boundary. Retains parameters while discarding delayed audio.
+func (c *Chain) DiscardHistory() { c.reset() }
+
+// DelayFrames is queried by the ALSA writer AFTER processing the period.
+// Even a bypassed limiter delays samples while the output chain is active.
+func (c *Chain) DelayFrames() int {
+	if !c.running { return 0 }
+	return len(c.lim.delay)
+}
+
 // SetParams queues a new configuration for the next period. Everything is
 // updated in place — filter states, the limiter's delay line and its gain
 // carry across — so a change mid-song does not click.

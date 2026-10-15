@@ -195,6 +195,17 @@ func (g *Gate) CloseAny(r Reason) *End {
 	return g.closeLocked(r)
 }
 
+// Lease exposes the existing device deadline; it never opens or renews capture.
+func (g *Gate) Lease(session uint32, now time.Time) (time.Time, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.open || session != g.session || !now.Before(g.openedAt.Add(g.maxOpen)) ||
+		(!g.acked && !now.Before(g.openedAt.Add(g.ackTimeout))) {
+		return time.Time{}, false
+	}
+	return g.openedAt.Add(g.maxOpen), true
+}
+
 // IsOpen reports the open session, if any.
 func (g *Gate) IsOpen() (uint32, bool) {
 	g.mu.Lock()
