@@ -5982,6 +5982,10 @@ async def event_loop_lag_monitor(interval: float = 1.0,
 
 async def main():
     log.info(f"EchoMuse Controller {api.CONTROLLER_VERSION}")
+    # Opt-in candidate only. Missing configuration keeps the native controller;
+    # invalid enabled configuration aborts startup before opening device links.
+    import em_realtime_bootstrap
+    await em_realtime_bootstrap.start()
     db.init(DB_PATH)
     auth.maybe_generate_bootstrap_token()
     em_player.init(

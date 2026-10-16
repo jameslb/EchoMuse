@@ -107,6 +107,7 @@ ARG EM_CONTROLLER_VERSION=dev
 ENV EM_CONTROLLER_VERSION=$EM_CONTROLLER_VERSION
 # Controller source
 COPY em_controller.py .
+COPY em_realtime_bootstrap.py .
 COPY em_api.py .
 COPY em_db.py .
 COPY em_auth.py .
