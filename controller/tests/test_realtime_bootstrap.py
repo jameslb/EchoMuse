@@ -4,7 +4,8 @@ from pathlib import Path
 import tempfile
 import unittest
 import sys
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import em_realtime_bootstrap as bootstrap
 
@@ -38,6 +39,22 @@ class BootstrapTests(unittest.IsolatedAsyncioTestCase):
         for change in [{'read_only_test_mode':False},{'enabled':1},{'extra':'value'},
                        {'speech_port':True},{'device_id':'*'}]:
             with self.assertRaises(ValueError):self.read({**self.config,**change})
+
+    async def test_verification_precedes_registration(self):
+        for failure in (None,RuntimeError('unavailable')):
+            backend=SimpleNamespace(verify=AsyncMock(side_effect=failure),create_route=Mock())
+            register=Mock()
+            with patch.dict(os.environ,{'ECHOMUSE_REALTIME_CONFIG':'explicit.local.json'}), \
+                 patch.object(bootstrap,'read_config',return_value=self.config), \
+                 patch.dict(sys.modules,{'ha_dot_backend':SimpleNamespace(Backend=Mock(return_value=backend)),
+                                         'em_realtime':SimpleNamespace(register=register)}):
+                if failure:
+                    with self.assertRaises(RuntimeError):await bootstrap.start()
+                    register.assert_not_called()
+                else:
+                    self.assertTrue(await bootstrap.start())
+                    register.assert_called_once_with('synthetic-dot',backend.create_route)
+                backend.verify.assert_awaited_once()
 
 
 if __name__=='__main__':unittest.main()

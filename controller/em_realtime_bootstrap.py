@@ -46,13 +46,10 @@ async def start():
     config = read_config(path)
     # These imports succeed only in a deliberately packaged candidate image.
     from ha_dot_backend import Backend
-    from echomuse_route import EchoRoute
     import em_realtime
     backend = Backend(config['pipeline_id'], speech_host=config['speech_host'],
         speech_port=config['speech_port'],voice=config['voice'],
         engineering_voice=config['engineering_voice'])
     await backend.verify()
-    def factory(control, data, **options):
-        return EchoRoute(backend.create_conversation, control, data, **options)
-    em_realtime.register(config['device_id'], factory)
+    em_realtime.register(config['device_id'], backend.create_route)
     return True
