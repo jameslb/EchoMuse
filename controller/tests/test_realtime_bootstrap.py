@@ -53,7 +53,7 @@ class BootstrapTests(unittest.IsolatedAsyncioTestCase):
                     register.assert_not_called()
                 else:
                     self.assertTrue(await bootstrap.start())
-                    register.assert_called_once_with('synthetic-dot',backend.create_route)
+                    register.assert_called_once_with('synthetic-dot',backend.create_route,strict_wake=True)
                 backend.verify.assert_awaited_once()
 
 

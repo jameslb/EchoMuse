@@ -199,5 +199,35 @@ class BindingTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await self.binding.frame(b'new-private-frame'))
         self.assertIsNone(getattr(self.device,'realtime',None))
 
+    async def test_strict_policy_survives_missing_capabilities_and_closed_binding(self):
+        rt.register('test-dot',Route,strict_wake=True)
+        self.assertFalse(rt.native_wake_allowed('test-dot'))
+        self.assertTrue(rt.native_wake_allowed('another-dot'))
+        self.device.capabilities=[]
+        self.assertIsNone(rt.attach(self.device,claim))
+        self.assertFalse(rt.native_wake_allowed('test-dot'))
+        self.binding.strict_wake=True
+        await self.binding.close()
+        self.assertTrue(await self.wake(9))
+        self.assertEqual(json.loads(self.device.control_ws.sent[-1])['reason'],'candidate_not_ready')
+        self.assertTrue(await self.binding.frame(b'private-frame'))
+        self.assertEqual(self.binding.route.frames,[])
+
+    async def test_strict_muted_or_unknown_wakes_never_reach_native(self):
+        self.binding.strict_wake=True
+        for muted,private in [(True,True),(False,False)]:
+            self.device.muted,self.device.listen_view.private=muted,private
+            self.assertTrue(await self.wake(10))
+            self.assertEqual(self.binding.route.wakes,[])
+            self.assertTrue(await self.binding.frame(b'private-frame'))
+        self.assertEqual(self.binding.route.frames,[])
+
+    async def test_state_loss_after_ownership_still_retires_route(self):
+        await self.wake()
+        await self.binding.control({'type':'rt_ready'})
+        await self.binding.wake_task
+        await self.binding.control({'type':'listen_state','state':'unknown'})
+        self.assertTrue(self.binding.closed)
+
 
 if __name__=='__main__':unittest.main()

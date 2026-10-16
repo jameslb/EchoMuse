@@ -2722,6 +2722,12 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown",
     trace display, not a control-flow key) so a future change to the label
     format can't silently change behaviour here.
     """
+    if is_wakeword and not em_realtime.native_wake_allowed(device.device_id):
+        # Enforce the bounded candidate policy even if no binding attached or
+        # a stream-scored wake reached this native entry point. Explicit button
+        # turns/announcements retain their ordinary behavior.
+        log.warning('Native wake suppressed by the explicit candidate policy')
+        return
     drained = 0
     while not device.mic_queue.empty():
         try:

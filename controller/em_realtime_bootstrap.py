@@ -51,5 +51,5 @@ async def start():
         speech_port=config['speech_port'],voice=config['voice'],
         engineering_voice=config['engineering_voice'])
     await backend.verify()
-    em_realtime.register(config['device_id'], backend.create_route)
+    em_realtime.register(config['device_id'], backend.create_route, strict_wake=True)
     return True
