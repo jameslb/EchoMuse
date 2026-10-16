@@ -17,11 +17,11 @@ type playbackMark struct {
 	end   uint64
 }
 
-// realtimePlayback is owned by the ALSA writer during a complete mix/write
-// cycle. Commands take the same lock: a flush cannot race a period already
-// taken from the queue and acknowledge before that period reaches hardware.
-// No callback/network I/O is performed under this lock.
+// cycleMu serializes lifecycle commands with complete mix/write cycles so a
+// flush cannot acknowledge a period that has not reached hardware. mu protects
+// queue/state only: producers must remain free during a blocking ALSA write.
 type realtimePlayback struct {
+	cycleMu        sync.Mutex
 	mu             sync.Mutex
 	receiver       *satellite.Receiver
 	stream         [16]byte
@@ -52,6 +52,8 @@ func (r *realtimePlayback) closeLocked() {
 }
 
 func (r *realtimePlayback) open(stream [16]byte, now, expires time.Time) error {
+	r.cycleMu.Lock()
+	defer r.cycleMu.Unlock()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.receiver != nil || r.closing != nil || !expires.After(now) || expires.Sub(now) > 30*time.Second {
@@ -69,6 +71,8 @@ func (r *realtimePlayback) open(stream [16]byte, now, expires time.Time) error {
 }
 
 func (r *realtimePlayback) flush(stream [16]byte, turn uint32) bool {
+	r.cycleMu.Lock()
+	defer r.cycleMu.Unlock()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.receiver == nil || !r.receiver.Flush(stream, turn) {
@@ -78,6 +82,25 @@ func (r *realtimePlayback) flush(stream [16]byte, turn uint32) bool {
 	r.partial, r.used, r.marks, r.events = satellite.Chunk{}, 0, nil, nil
 	r.waiting, r.reset, r.fence = true, true, 0
 	return true
+}
+
+func (r *realtimePlayback) beginCycle() {
+	r.cycleMu.Lock()
+	r.mu.Lock()
+}
+
+func (r *realtimePlayback) endCycle() {
+	r.mu.Unlock()
+	r.cycleMu.Unlock()
+}
+
+// Called with both locks held. Keep the lifecycle fence while letting network
+// frames and receipt readers progress during a hardware-paced write. A push
+// error can retire the route here; written() preserves its pending reset fence.
+func (r *realtimePlayback) writePCM(write func() error) error {
+	r.mu.Unlock()
+	defer r.mu.Lock()
+	return write()
 }
 
 func (r *realtimePlayback) push(wire []byte) error {

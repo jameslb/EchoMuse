@@ -23,6 +23,8 @@ func (p *PcmSpeaker) FlushRealtime(stream [16]byte, turn uint32) bool {
 func (p *PcmSpeaker) PushRealtime(wire []byte) error { return p.realtime.push(wire) }
 
 func (p *PcmSpeaker) CloseRealtime() {
+	p.realtime.cycleMu.Lock()
+	defer p.realtime.cycleMu.Unlock()
 	p.realtime.mu.Lock()
 	defer p.realtime.mu.Unlock()
 	if p.realtime.receiver != nil {
@@ -31,6 +33,8 @@ func (p *PcmSpeaker) CloseRealtime() {
 }
 
 func (p *PcmSpeaker) CloseRealtimeFor(stream [16]byte, turn uint32) {
+	p.realtime.cycleMu.Lock()
+	defer p.realtime.cycleMu.Unlock()
 	p.realtime.mu.Lock()
 	defer p.realtime.mu.Unlock()
 	if p.realtime.receiver != nil && p.realtime.stream == stream && p.realtime.turn == turn {
@@ -65,12 +69,12 @@ func (p *PcmSpeaker) realtimePosition() (pcmPosition, bool) {
 	return pcmPlaybackPosition(string(b), uint64(os.Getpid()))
 }
 
-// Lock spans prepare, mix, AEC reference tap and both hardware writes. Thus a
+// The lifecycle lock spans prepare, mix, AEC tap and both hardware writes. Thus a
 // concurrently received flush retires the previous cycle as a unit. No socket
 // write, callback, resampling or unbounded queue wait occurs under this lock.
 func (p *PcmSpeaker) beginRealtimeCycle() (bool, pcmPosition) {
 	r := &p.realtime
-	r.mu.Lock()
+	r.beginCycle()
 	owned := r.receiver != nil || r.closing != nil
 	if r.reset {
 		p.voice.flush()
@@ -95,7 +99,7 @@ func (p *PcmSpeaker) beginRealtimeCycle() (bool, pcmPosition) {
 
 func (p *PcmSpeaker) endRealtimeCycle(before pcmPosition, marks []playbackMark) {
 	r := &p.realtime
-	defer r.mu.Unlock()
+	defer r.endCycle()
 	if r.receiver == nil && r.closing == nil {
 		return
 	}

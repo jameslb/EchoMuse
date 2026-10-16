@@ -199,3 +199,73 @@ func TestExpiryCannotSkipDSPResetAtEndOfCycle(t *testing.T) {
 		t.Fatal("post-write acknowledged undiscarded DSP history")
 	}
 }
+
+func TestRealtimeIngressContinuesDuringBlockedHardwareWrite(t *testing.T) {
+	r := rtFresh(t)
+	entered, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	go func() {
+		r.beginCycle()
+		defer r.endCycle()
+		r.writePCM(func() error { close(entered); <-release; return nil })
+		close(finished)
+	}()
+	<-entered
+	defer func() { close(release); <-finished }()
+	pushed := make(chan error, 1)
+	go func() {
+		// A complete 200 ms segment must arrive while the hardware is blocked,
+		// not one 20 ms packet per 42.7 ms ALSA cycle.
+		for offset := uint32(0); offset < 9600; offset += 960 {
+			if err := r.push(rtWire(0, 1, offset, 9600, 960)); err != nil {
+				pushed <- err
+				return
+			}
+		}
+		pushed <- nil
+	}()
+	select {
+	case err := <-pushed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("incoming PCM blocked behind hardware write")
+	}
+	// A lifecycle command must still wait for the in-flight hardware write.
+	if r.cycleMu.TryLock() {
+		r.cycleMu.Unlock()
+		t.Fatal("lost hardware fence")
+	}
+}
+
+func TestRealtimeFlushWaitsForWriteThenRetiresQueuedAudio(t *testing.T) {
+	r := rtFresh(t)
+	r.beginCycle()
+	started, flushed := make(chan struct{}), make(chan bool, 1)
+	go func() { close(started); flushed <- r.flush(rtID, 1) }()
+	<-started
+	r.writePCM(func() error {
+		if err := r.push(rtWire(0, 1, 0, 960, 960)); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-flushed:
+			t.Fatal("flush crossed active hardware write")
+		default:
+		}
+		return nil
+	})
+	r.endCycle()
+	select {
+	case ok := <-flushed:
+		if !ok {
+			t.Fatal("flush rejected")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("flush stuck after write")
+	}
+	r.observe(rtPos(100, 100), rtNow)
+	if audio, _ := r.render(2048); audio != nil {
+		t.Fatal("retired PCM survived")
+	}
+}

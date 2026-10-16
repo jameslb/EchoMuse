@@ -588,9 +588,9 @@ func (p *PcmSpeaker) silenceLoop() {
 			p.levelTap(level)
 		}
 		meter.beforeWrite()
-		if err := p.pump(out); err != nil {
+		if err := p.realtime.writePCM(func() error { return p.pump(out) }); err != nil {
 			p.realtime.closeLocked()
-			p.realtime.mu.Unlock()
+			p.realtime.endCycle()
 			log.Printf("silenceLoop: pump error: %v", err)
 			return
 		}
