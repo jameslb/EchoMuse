@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wilbowes/EchoMuse/internal/aecdiag"
 	"github.com/wilbowes/EchoMuse/internal/bindings/speaker"
 	"github.com/wilbowes/EchoMuse/internal/client"
 )
@@ -24,7 +25,9 @@ func wireRealtime(ctx context.Context, c *client.ControlClient, d *client.DataCl
 		mu.Lock()
 		defer mu.Unlock()
 		if command.Type == "rt_close" {
-			p.CloseRealtimeFor(command.Stream, command.Turn)
+			if p.CloseRealtimeFor(command.Stream, command.Turn) {
+				d.AECProbe.StopFor(command.Stream)
+			}
 			return
 		}
 		if command.Type == "rt_open" {
@@ -34,11 +37,14 @@ func wireRealtime(ctx context.Context, c *client.ControlClient, d *client.DataCl
 			}
 			if p.OpenRealtime(command.Stream, deadline) == nil {
 				session = command.Session
+				// Missing/invalid/consumed permit leaves capture disabled.
+				_ = d.AECProbe.Start(aecdiag.Root, session, command.Stream, deadline)
 			}
 			return
 		}
 		if !allowed() {
 			p.CloseRealtime()
+			d.AECProbe.Stop("privacy_closed")
 			return
 		}
 		p.FlushRealtime(command.Stream, command.Turn)
@@ -48,10 +54,11 @@ func wireRealtime(ctx context.Context, c *client.ControlClient, d *client.DataCl
 		defer mu.Unlock()
 		if !allowed() {
 			p.CloseRealtime()
+			d.AECProbe.Stop("privacy_closed")
 			return nil
 		}
 		return p.PushRealtime(wire)
-	}, p.CloseRealtime)
+	}, func() { p.CloseRealtime(); d.AECProbe.Stop("disconnected") })
 	go func() {
 		ticker := time.NewTicker(20 * time.Millisecond)
 		defer ticker.Stop()
@@ -59,12 +66,14 @@ func wireRealtime(ctx context.Context, c *client.ControlClient, d *client.DataCl
 			select {
 			case <-ctx.Done():
 				p.CloseRealtime()
+				d.AECProbe.Stop("shutdown")
 				return
 			case <-ticker.C:
 			}
 			mu.Lock()
 			if !allowed() {
 				p.CloseRealtime()
+				d.AECProbe.Stop("privacy_closed")
 			}
 			mu.Unlock()
 			for {
@@ -74,6 +83,7 @@ func wireRealtime(ctx context.Context, c *client.ControlClient, d *client.DataCl
 				}
 				if err := c.SendRealtimeReceipt(event); err != nil {
 					p.CloseRealtime()
+					d.AECProbe.Stop("control_disconnected")
 					break
 				}
 			}

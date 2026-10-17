@@ -32,14 +32,16 @@ func (p *PcmSpeaker) CloseRealtime() {
 	}
 }
 
-func (p *PcmSpeaker) CloseRealtimeFor(stream [16]byte, turn uint32) {
+func (p *PcmSpeaker) CloseRealtimeFor(stream [16]byte, turn uint32) bool {
 	p.realtime.cycleMu.Lock()
 	defer p.realtime.cycleMu.Unlock()
 	p.realtime.mu.Lock()
 	defer p.realtime.mu.Unlock()
 	if p.realtime.receiver != nil && p.realtime.stream == stream && p.realtime.turn == turn {
 		p.realtime.closeLocked()
+		return true
 	}
+	return false
 }
 
 func (p *PcmSpeaker) RealtimeOwned() bool {

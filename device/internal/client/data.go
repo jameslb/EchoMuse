@@ -12,6 +12,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/wilbowes/EchoMuse/internal/aec"
+	"github.com/wilbowes/EchoMuse/internal/aecdiag"
 	"github.com/wilbowes/EchoMuse/internal/beamformer"
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/listen"
@@ -293,7 +294,9 @@ type DataClient struct {
 	// randomly, so the old goroutine can run Process() concurrently with
 	// the new one's Lock()/Process(). Uncontended outside that brief
 	// overlap, so the cost is a no-op lock per 160ms batch.
-	pipeMu sync.Mutex
+	pipeMu        sync.Mutex
+	AECProbe      aecdiag.Recorder
+	diagMicSerial uint64
 
 	// The turn stream's speech gate (speechgate.go). newSpeechStream returns
 	// a scorer for one turn, or nil for the RMS threshold; a field so tests
@@ -1067,6 +1070,8 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 	preroll := make([][]byte, 0, prerollBudgetMs/160+1) // capacity hint at the real batch cadence
 	var seqNum uint16
 	var periodCount uint64 // periodic RMS diagnostic
+	diagStream := atomic.AddUint64(&d.diagMicSerial, 1)
+	var diagSamples, diagBatch uint64
 	var lastClipped uint64 // clip count at last diag line
 
 	// Memoized linear mic gain — recomputed only when the config dB value
@@ -1182,6 +1187,7 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			if !ok {
 				return
 			}
+			diagReceived := aecdiag.Stamp()
 			// Stop has priority: select picks randomly among ready cases,
 			// so without this a closed stopCh racing a ready mic channel
 			// keeps this goroutine draining periods alongside its
@@ -1237,6 +1243,8 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			}
 			mono, angle := d.beam.Process(raw, beamAngle, gainLin)
 			clipped := d.beam.ClippedSamples()
+			diagPre := mono // AEC returns fresh output; never changes this input.
+			diagSelected := d.beam.OutputChannel(beamAngle)
 
 			// AEC — subtract the speaker's own output before anything
 			// measures or gates the signal. No-op while aecEnabled=false.
@@ -1257,7 +1265,8 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			if d.aec.Enabled() {
 				echoRef = d.beam.EchoRef(raw)
 			}
-			if echoRef != nil && d.noteEchoRef(echoRef) {
+			diagHardware := echoRef != nil && d.noteEchoRef(echoRef)
+			if diagHardware {
 				// Every microphone is cancelled, not only the one in use:
 				// the echo path differs per microphone and a turn locks to
 				// a different one each time (#814).
@@ -1266,6 +1275,7 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			} else {
 				mono = d.aec.Process(mono)
 			}
+			diagPost := mono
 
 			// ── Processing pipeline ──────────────────────────────────────
 			// VAD on raw beamformed output — pre-NS/AGC so threshold is
@@ -1333,6 +1343,15 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			// frozen at whatever it last was. (RNNoise NS removed
 			// 2026-07-12 — see internal/processor package comment.)
 			mono = d.proc.Process(mono, agcEnabled, speech)
+			if d.AECProbe.Active() {
+				if _, open := d.ListenLease(d.AECProbe.Session()); open {
+					d.AECProbe.Capture(aecdiag.Meta{Stream: diagStream, Batch: diagBatch, SampleStart: diagSamples, ReceivedNS: diagReceived, Selected: diagSelected, Clipped: clipped, GainDB: gainDb, AEC: d.aec.Enabled(), Hardware: diagHardware}, diagPre, diagPost, echoRef, mono)
+				} else {
+					d.AECProbe.Stop("lease_closed")
+				}
+			}
+			diagSamples += uint64(len(mono) / 2)
+			diagBatch++
 			d.pipeMu.Unlock()
 			// ─────────────────────────────────────────────────────────────
 
