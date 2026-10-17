@@ -5991,7 +5991,7 @@ async def main():
     # Opt-in candidate only. Missing configuration keeps the native controller;
     # invalid enabled configuration aborts startup before opening device links.
     import em_realtime_bootstrap
-    await em_realtime_bootstrap.start()
+    candidate_enabled = await em_realtime_bootstrap.start()
     db.init(DB_PATH)
     auth.maybe_generate_bootstrap_token()
     em_player.init(
@@ -6000,6 +6000,8 @@ async def main():
     )
 
     runner = await api.create_runner(_devices, _shell_pending, _shell_dashboard)
+    if candidate_enabled:
+        em_realtime_bootstrap.register_aec_export(runner.app, api, auth)
     await runner.setup()
     site = web.TCPSite(runner, SERVER_HOST, API_PORT)
     await site.start()
