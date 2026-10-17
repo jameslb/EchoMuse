@@ -123,9 +123,12 @@ type Canceller struct {
 	dcnt  int
 
 	// C-side scratch buffers, allocated once per state init.
-	micBuf *C.spx_int16_t
-	refBuf *C.spx_int16_t
-	outBuf *C.spx_int16_t
+	micBuf   *C.spx_int16_t
+	refBuf   *C.spx_int16_t
+	outBuf   *C.spx_int16_t
+	floatMic bool // unity-gain S24 precision; incompatible with amplified S16 states
+	floatIn  [FrameSize]float32
+	floatOut [FrameSize]float32
 
 	underruns uint64 // ref ring empty while enabled (diagnostic)
 	resyncs   uint64 // stale-reference trims (see governor in Process)
@@ -478,6 +481,7 @@ func (c *Canceller) process(mono, hwref []byte) []byte {
 }
 
 func (c *Canceller) processLocked(mono, hwref []byte) []byte {
+	c.setFloatMicLocked(false)
 	if !c.enabled || c.st == nil {
 		return mono
 	}
@@ -650,6 +654,7 @@ func (c *Canceller) ProcessMicsWithRef(mics [][]byte, active int, ref []byte) []
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.setFloatMicLocked(false)
 	mono := mics[active]
 	ok := c.enabled && c.hwRef && c.micStates[0] != nil && len(mics) == NumMics &&
 		len(mono) > 0 && len(mono)%(FrameSize*2) == 0 && len(ref) == len(mono)
@@ -713,6 +718,48 @@ func frameRMS(s []int16) float64 {
 // state of the same frame size, filter length and rate.
 const stateMagic = "EMAEC1"
 
+func (c *Canceller) stateMagic() string {
+	if c.floatMic {
+		return "EMAF32"
+	}
+	return stateMagic
+}
+
+// Switching amplitude domains must never reuse an amplified learned path.
+// Separate persistence names preserve old filters for rollback.
+func (c *Canceller) setFloatMicLocked(on bool) {
+	if c.floatMic == on {
+		return
+	}
+	c.floatMic = on
+	c.farQuiet, c.statFrames = 0, 0
+	c.statInSum, c.statOutSum, c.statRefSum = 0, 0, 0
+	c.lastSaveTry, c.lastMicsSaveTry = time.Time{}, time.Time{}
+	if c.st != nil {
+		c.buildLocked()
+		if !c.hwRef {
+			c.seedRingLocked()
+		}
+		c.loadStateLocked()
+	}
+}
+
+func (c *Canceller) cancelFloatLocked(channel int) {
+	C.em_echo_cancellation_float(c.micStates[channel],
+		(*C.float)(unsafe.Pointer(&c.floatIn[0])), c.refBuf,
+		(*C.float)(unsafe.Pointer(&c.floatOut[0])))
+}
+
+func (c *Canceller) setFloatReferenceLocked(ref []byte) bool {
+	far := unsafe.Slice((*int16)(unsafe.Pointer(c.refBuf)), FrameSize)
+	quiet := true
+	for i := range far {
+		far[i] = int16(binary.LittleEndian.Uint16(ref[i*2:]))
+		quiet = quiet && far[i] == 0
+	}
+	return quiet
+}
+
 const stateHeader = len(stateMagic) + 2 + 2 + 4 + 4 // magic, frame, tailMs, rate, payload
 
 // ExportState returns the learned echo path, or an error when cancellation
@@ -733,7 +780,7 @@ func (c *Canceller) exportStateLocked(st *C.SpeexEchoState) ([]byte, error) {
 	}
 	n := int(C.em_echo_state_size(st))
 	out := make([]byte, stateHeader+n)
-	copy(out, stateMagic)
+	copy(out, c.stateMagic())
 	h := out[len(stateMagic):]
 	binary.LittleEndian.PutUint16(h[0:], uint16(FrameSize))
 	binary.LittleEndian.PutUint16(h[2:], uint16(c.stTailMs))
@@ -767,7 +814,7 @@ func (c *Canceller) checkStateLocked(st *C.SpeexEchoState, b []byte) error {
 	if st == nil {
 		return errors.New("aec: not enabled")
 	}
-	if len(b) < stateHeader || string(b[:len(stateMagic)]) != stateMagic {
+	if len(b) < stateHeader || string(b[:len(stateMagic)]) != c.stateMagic() {
 		return errors.New("aec: not a saved echo path")
 	}
 	h := b[len(stateMagic):]

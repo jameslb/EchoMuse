@@ -104,7 +104,9 @@ func TestThreeChannelsHashesAndNoMutation(t *testing.T) {
 	root := permit(t, 20)
 	r := start(t, root, time.Now().Add(time.Minute))
 	pre, post, ref, dsp := []byte{1, 2, 3, 4}, []byte{5, 6, 7, 8}, []byte{9, 10, 11, 12}, []byte{13, 14, 15, 16}
-	r.Capture(meta(), pre, post, ref, dsp)
+	metadata := meta()
+	metadata.InputFormat = "unity_f32_s24"
+	r.Capture(metadata, pre, post, ref, dsp)
 	pre[0] = 99 // retaining caller buffers would corrupt the captured bytes
 	r.Stop("test")
 	if e := r.Wait(); e != nil {
@@ -123,6 +125,13 @@ func TestThreeChannelsHashesAndNoMutation(t *testing.T) {
 	sum := sha256.Sum256(dsp)
 	if m.PostDSPHash != hex.EncodeToString(sum[:]) || !m.RefValid || m.Samples != 2 {
 		t.Fatal(m)
+	}
+	if m.InputFormat != "unity_f32_s24" {
+		t.Fatal("lost actual AEC input domain")
+	}
+	manifest := result(t, root)
+	if manifest["version"] != float64(2) || manifest["channels"].([]any)[0] != "selected_gain_monitor" {
+		t.Fatal("gain monitor incorrectly labelled as actual float AEC input")
 	}
 	if result(t, root)["physical_acceptance"] != false {
 		t.Fatal("claimed acceptance")

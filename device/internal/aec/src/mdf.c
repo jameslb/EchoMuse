@@ -682,8 +682,28 @@ EXPORT void speex_echo_cancel(SpeexEchoState *st, const spx_int16_t *in, const s
    speex_echo_cancellation(st, in, far_end, out);
 }
 
-/** Performs echo cancellation on a frame */
-EXPORT void speex_echo_cancellation(SpeexEchoState *st, const spx_int16_t *in, const spx_int16_t *far_end, spx_int16_t *out)
+/* EchoMuse FLOATING_POINT extension: retain fractional S16 units from S24
+   microphones through cancellation. The ordinary S16 API remains unchanged.
+   The float path uses unity microphone gain; apply gain after cancellation. */
+static void em_filter_dc_float(const float *in, float radius, float *out,
+                              int len, float *mem, int stride)
+{
+   int i;
+   float den2 = radius*radius + .7*(1-radius)*(1-radius);
+   for (i=0;i<len;i++)
+   {
+      float vin = in[i*stride];
+      float vout = mem[0] + vin;
+      mem[0] = mem[1] + 2*(-vin + radius*vout);
+      mem[1] = vin - den2*vout;
+      out[i] = radius*vout;
+   }
+}
+
+/** Shared core; exactly one input/output pair is non-null. */
+static void em_echo_cancellation(SpeexEchoState *st, const spx_int16_t *in,
+      const spx_int16_t *far_end, spx_int16_t *out,
+      const float *float_in, float *float_out)
 {
    int i,j, chan, speak;
    int N,M, C, K;
@@ -716,7 +736,10 @@ EXPORT void speex_echo_cancellation(SpeexEchoState *st, const spx_int16_t *in, c
    for (chan = 0; chan < C; chan++)
    {
       /* Apply a notch filter to make sure DC doesn't end up causing problems */
-      filter_dc_notch16(in+chan, st->notch_radius, st->input+chan*st->frame_size, st->frame_size, st->notch_mem+2*chan, C);
+      if (float_in)
+         em_filter_dc_float(float_in+chan, st->notch_radius, st->input+chan*st->frame_size, st->frame_size, st->notch_mem+2*chan, C);
+      else
+         filter_dc_notch16(in+chan, st->notch_radius, st->input+chan*st->frame_size, st->frame_size, st->notch_mem+2*chan, C);
       /* Copy input data to buffer and apply pre-emphasis */
       /* Copy input data to buffer */
       for (i=0;i<st->frame_size;i++)
@@ -970,17 +993,21 @@ EXPORT void speex_echo_cancellation(SpeexEchoState *st, const spx_int16_t *in, c
 #endif
          tmp_out = ADD32(tmp_out, EXTEND32(MULT16_16_P15(st->preemph, st->memE[chan])));
       /* This is an arbitrary test for saturation in the microphone signal */
-         if (in[i*C+chan] <= -32000 || in[i*C+chan] >= 32000)
+         float sample = float_in ? float_in[i*C+chan] : in[i*C+chan];
+         if (sample <= -32000 || sample >= 32000)
          {
          if (st->saturated == 0)
             st->saturated = 1;
          }
-         out[i*C+chan] = WORD2INT(tmp_out);
+         if (float_out)
+            float_out[i*C+chan] = tmp_out;
+         else
+            out[i*C+chan] = WORD2INT(tmp_out);
          st->memE[chan] = tmp_out;
       }
 
 #ifdef DUMP_ECHO_CANCEL_DATA
-      dump_audio(in, far_end, out, st->frame_size);
+      if (in) dump_audio(in, far_end, out, st->frame_size);
 #endif
 
       /* Compute error signal (filter update version) */
@@ -1020,7 +1047,7 @@ EXPORT void speex_echo_cancellation(SpeexEchoState *st, const spx_int16_t *in, c
       /* Things have gone really bad */
       st->screwed_up += 50;
       for (i=0;i<st->frame_size*C;i++)
-         out[i] = 0;
+         if (float_out) float_out[i] = 0; else out[i] = 0;
    } else if (SHR32(Sff, 2) > ADD32(Sdd, SHR32(MULT16_16(N, 10000),6)))
    {
       /* AEC seems to add lots of echo instead of removing it, let's see if it will improve */
@@ -1177,13 +1204,25 @@ EXPORT void speex_echo_cancellation(SpeexEchoState *st, const spx_int16_t *in, c
    {
       /* If the filter is adapted, take the filtered echo */
       for (i=0;i<st->frame_size;i++)
-         st->last_y[st->frame_size+i] = in[i]-out[i];
+         st->last_y[st->frame_size+i] = float_in ? float_in[i]-float_out[i] : in[i]-out[i];
    } else {
       /* If filter isn't adapted yet, all we can do is take the far end signal directly */
       /* moved earlier: for (i=0;i<N;i++)
       st->last_y[i] = st->x[i];*/
    }
 
+}
+
+EXPORT void speex_echo_cancellation(SpeexEchoState *st, const spx_int16_t *in,
+                                    const spx_int16_t *far_end, spx_int16_t *out)
+{
+   em_echo_cancellation(st, in, far_end, out, NULL, NULL);
+}
+
+static void em_echo_cancellation_float(SpeexEchoState *st, const float *in,
+                                      const spx_int16_t *far_end, float *out)
+{
+   em_echo_cancellation(st, NULL, far_end, NULL, in, out);
 }
 
 /* Compute spectrum of estimated echo for use in an echo post-filter */

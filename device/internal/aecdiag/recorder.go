@@ -40,10 +40,11 @@ type Meta struct {
 	SampleStart     uint64 `json:"sample_start"`
 	ReceivedNS      int64  `json:"received_mono_ns"`
 	Selected        int    `json:"selected_channel"`
-	Clipped         uint64 `json:"clipped_total"`
+	Clipped         uint64 `json:"clipped_total"` // S16 gain monitor; not float AEC input saturation
 	GainDB          int    `json:"gain_db"`
 	AEC             bool   `json:"aec_enabled"`
 	Hardware        bool   `json:"hardware_reference_selected"`
+	InputFormat     string `json:"aec_input_format,omitempty"`
 	RefValid        bool   `json:"reference_valid"`
 	Samples         int    `json:"samples"`
 	Offset          int    `json:"pcm_sample_offset"`
@@ -253,7 +254,7 @@ func (r *Recorder) save(pcm []byte, rows []Meta, reason string, ended int64) err
 		return err
 	}
 	ph, eh := sha256.Sum256(pcm), sha256.Sum256(events.Bytes())
-	summary := map[string]any{"version": 1, "session": r.session, "stream": hex.EncodeToString(r.stream[:]), "rate": 16000, "channels": []string{"selected_pre_aec", "selected_post_aec", "hardware_reference"}, "samples": len(pcm) / 6, "batches": len(rows), "started_mono_ns": r.startedNS, "ended_mono_ns": ended, "reason": reason, "pcm_sha256": hex.EncodeToString(ph[:]), "events_sha256": hex.EncodeToString(eh[:]), "physical_acceptance": false}
+	summary := map[string]any{"version": 2, "session": r.session, "stream": hex.EncodeToString(r.stream[:]), "rate": 16000, "channels": []string{"selected_gain_monitor", "selected_post_aec", "hardware_reference"}, "samples": len(pcm) / 6, "batches": len(rows), "started_mono_ns": r.startedNS, "ended_mono_ns": ended, "reason": reason, "pcm_sha256": hex.EncodeToString(ph[:]), "events_sha256": hex.EncodeToString(eh[:]), "physical_acceptance": false}
 	raw, err := json.Marshal(summary)
 	if err != nil {
 		return err

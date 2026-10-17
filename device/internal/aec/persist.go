@@ -44,7 +44,7 @@ func (c *Canceller) loadStateLocked() {
 		return
 	}
 	c.loadMicsLocked()
-	b, err := os.ReadFile(c.statePath)
+	b, err := os.ReadFile(c.stateFile())
 	if err != nil {
 		if !os.IsNotExist(err) {
 			log.Printf("[aec] saved echo path unreadable, starting cold: %v", err)
@@ -65,7 +65,14 @@ func (c *Canceller) loadStateLocked() {
 // microphones and not the seventh was not written by this filter.
 const micsMagic = "EMAEC2"
 
-func (c *Canceller) micsPath() string { return c.statePath + ".mics" }
+func (c *Canceller) stateFile() string {
+	if c.floatMic {
+		return c.statePath + ".unity-f32"
+	}
+	return c.statePath
+}
+
+func (c *Canceller) micsPath() string { return c.stateFile() + ".mics" }
 
 func (c *Canceller) exportMicsLocked() ([]byte, error) {
 	out := append([]byte(micsMagic), 0, 0)
@@ -165,7 +172,7 @@ func (c *Canceller) maybeSaveLocked(attDb float64, playing bool) {
 	if err != nil {
 		return
 	}
-	go writeState(c.statePath, b, attDb)
+	go writeState(c.stateFile(), b, attDb)
 }
 
 func writeState(path string, b []byte, attDb float64) {

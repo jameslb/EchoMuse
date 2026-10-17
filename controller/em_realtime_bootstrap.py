@@ -107,8 +107,10 @@ async def _aec_archive(ws):
     files = {name: await _read_aec_file(ws, name) for name in AEC_FILES}
     manifest = json.loads(files['capture.local.json'])
     pcm, events = files['aec.s16le'], files['events.local.jsonl']
-    if (manifest.get('version') != 1 or manifest.get('rate') != 16000
-            or manifest.get('channels') != ['selected_pre_aec', 'selected_post_aec', 'hardware_reference']
+    version = manifest.get('version')
+    first = 'selected_pre_aec' if version == 1 else 'selected_gain_monitor'
+    if (version not in (1, 2) or manifest.get('rate') != 16000
+            or manifest.get('channels') != [first, 'selected_post_aec', 'hardware_reference']
             or len(pcm) % 6 or manifest.get('samples') != len(pcm)//6
             or hashlib.sha256(pcm).hexdigest() != manifest.get('pcm_sha256')
             or hashlib.sha256(events).hexdigest() != manifest.get('events_sha256')):

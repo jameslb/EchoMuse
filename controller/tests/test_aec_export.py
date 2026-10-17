@@ -47,6 +47,19 @@ def fixture():
 
 
 class TransferTests(unittest.IsolatedAsyncioTestCase):
+    async def test_float_monitor_archive_and_mismatched_channel_version(self):
+        files = fixture()
+        manifest = json.loads(files['capture.local.json'])
+        manifest['version'] = 2
+        files['capture.local.json'] = json.dumps(manifest).encode()
+        with self.assertRaises(ValueError):
+            await module._aec_archive(Shell(files))
+        manifest['channels'][0] = 'selected_gain_monitor'
+        files['capture.local.json'] = json.dumps(manifest).encode()
+        raw = await module._aec_archive(Shell(files))
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            self.assertEqual(archive.read('capture.local.json'), files['capture.local.json'])
+
     async def test_exact_archive_with_fragmented_sentinel(self):
         files = fixture()
         shell = Shell(files)

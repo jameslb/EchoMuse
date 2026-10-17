@@ -1243,7 +1243,11 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			}
 			mono, angle := d.beam.Process(raw, beamAngle, gainLin)
 			clipped := d.beam.ClippedSamples()
-			diagPre := mono // AEC returns fresh output; never changes this input.
+			// Retain a bounded S16 gain monitor for comparison with old captures.
+			// On the float hardware path this is NOT the canceller's input:
+			// the canceller receives full-precision unity-gain microphones.
+			diagPre := mono
+			diagInputFormat := "gained_s16"
 			diagSelected := d.beam.OutputChannel(beamAngle)
 
 			// AEC — subtract the speaker's own output before anything
@@ -1271,7 +1275,9 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 				// the echo path differs per microphone and a turn locks to
 				// a different one each time (#814).
 				sel := d.beam.OutputChannel(beamAngle)
-				mono = d.aec.ProcessMicsWithRef(d.beam.MicChannels(raw, gainLin, sel, mono), sel, echoRef)
+				mics := beamformer.MicChannelsFloat(raw)
+				mono = d.aec.ProcessMicsFloatWithRef(mics, sel, echoRef, gainLin)
+				diagInputFormat = "unity_f32_s24"
 			} else {
 				mono = d.aec.Process(mono)
 			}
@@ -1322,16 +1328,17 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			}
 
 			// Periodic RMS diagnostic — every ~10 min, or within ~16s of
-			// the mic gain clamping a sample (clipping is the one signal
-			// that says micGainDb is too hot for the room, so it's
+			// the S16 gain monitor clamping a sample (on the float hardware
+			// path this does not imply clipping at the AEC input, so report
+			// the input domain alongside the monitor count). Clipping is
 			// reported promptly; the %100 bound stops sustained clipping
 			// becoming its own log flood). Was every 100 counts (~16s
 			// measured on-device) while idle capture levels were being
 			// characterised — that job is done (2026-07-07 fleet
 			// analysis) and /tmp/server.log is RAM-backed and unrotated.
 			if periodCount%3750 == 0 || (clipped != lastClipped && periodCount%100 == 0) {
-				log.Printf("[data] VAD diag: rms=%.5f threshold=%.5f gain=%ddB clipped=%d gate=%v active=%v agc=%v",
-					rms, threshold*gainLin, gainDb, clipped, speech, active, agcEnabled)
+				log.Printf("[data] VAD diag: rms=%.5f threshold=%.5f gain=%ddB gain_monitor_clipped=%d aec_input=%s gate=%v active=%v agc=%v",
+					rms, threshold*gainLin, gainDb, clipped, diagInputFormat, speech, active, agcEnabled)
 				lastClipped = clipped
 			}
 			periodCount++
@@ -1345,7 +1352,7 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			mono = d.proc.Process(mono, agcEnabled, speech)
 			if d.AECProbe.Active() {
 				if _, open := d.ListenLease(d.AECProbe.Session()); open {
-					d.AECProbe.Capture(aecdiag.Meta{Stream: diagStream, Batch: diagBatch, SampleStart: diagSamples, ReceivedNS: diagReceived, Selected: diagSelected, Clipped: clipped, GainDB: gainDb, AEC: d.aec.Enabled(), Hardware: diagHardware}, diagPre, diagPost, echoRef, mono)
+					d.AECProbe.Capture(aecdiag.Meta{Stream: diagStream, Batch: diagBatch, SampleStart: diagSamples, ReceivedNS: diagReceived, Selected: diagSelected, Clipped: clipped, GainDB: gainDb, AEC: d.aec.Enabled(), Hardware: diagHardware, InputFormat: diagInputFormat}, diagPre, diagPost, echoRef, mono)
 				} else {
 					d.AECProbe.Stop("lease_closed")
 				}

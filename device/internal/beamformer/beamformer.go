@@ -448,6 +448,27 @@ func (b *Beamformer) MicChannels(raw []byte, gain float64, sel int, selected []b
 	return out
 }
 
+// MicChannelsFloat preserves S24 microphone precision at unity gain in S16
+// amplitude units. A float32 represents every S24 value and its /256 scaling
+// exactly. No gain or clipping occurs before echo cancellation.
+func MicChannelsFloat(raw []byte) [][]float32 {
+	n := len(raw) / frameSize
+	storage := make([]float32, NumMics*n)
+	out := make([][]float32, NumMics)
+	for ch := range out {
+		out[ch] = storage[ch*n : (ch+1)*n]
+		for i := range out[ch] {
+			base := i*frameSize + ch*byteSample
+			v := int32(raw[base]) | int32(raw[base+1])<<8 | int32(raw[base+2])<<16
+			if v&0x800000 != 0 {
+				v |= ^int32(0xffffff)
+			}
+			out[ch][i] = float32(v) / 256
+		}
+	}
+	return out
+}
+
 // hfEnergy returns the mean squared HF energy for direction di.
 // hfChannels is indexed 0–5 by direction (matching decodeChannels output),
 // not by ALSA channel number — directionToChannel maps direction→channel
