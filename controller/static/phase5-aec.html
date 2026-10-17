@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phase 5 saved AEC diagnostic</title>
+<style>body{font:16px system-ui;max-width:42rem;margin:3rem auto;padding:1rem;background:#18201c;color:#eee}input,button{font:inherit;padding:.6rem;margin:.5rem 0}label{display:block}#status{white-space:pre-wrap}</style></head>
+<body><h1>Saved AEC diagnostic</h1>
+<p>Download the completed private capture from this device. This does not start recording or playback. Close its console first.</p>
+<label for="device">Device ID from the dashboard</label><input id="device" autocomplete="off" spellcheck="false">
+<button id="download">Download saved capture</button><p id="status" role="status"></p>
+<script>
+'use strict';
+const button = document.getElementById('download');
+const status = document.getElementById('status');
+button.onclick = async () => {
+  if (button.disabled) return;
+  const id = document.getElementById('device').value.trim();
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) { status.textContent = 'Enter the exact device ID.'; return; }
+  // Same Bearer-only session and same-origin route as dashboard API.blob.
+  // Credentials never enter URLs, downloads, messages or logs.
+  const token = localStorage.getItem('em_token');
+  if (!token) { status.textContent = 'Sign in through the normal dashboard first.'; return; }
+  button.disabled = true;
+  status.textContent = 'Collecting the saved capture…';
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), 65000);
+  try {
+    const response = await fetch('../api/phase5/aec/' + encodeURIComponent(id), {
+      headers: {Authorization: 'Bearer ' + token}, signal: abort.signal, cache: 'no-store'});
+    if (!response.ok) throw new Error('Export failed (HTTP ' + response.status + '). No automatic retry.');
+    const blob = await response.blob();
+    if (blob.size === 0 || blob.size > 2500000) throw new Error('Invalid archive size.');
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url; link.download = 'phase5-aec.local.zip'; link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    status.textContent = 'Saved capture downloaded. Keep it private; playback quality still requires review.';
+  } catch (error) {
+    status.textContent = error.name === 'AbortError' ? 'Export timed out. No automatic retry.' : error.message;
+  } finally { clearTimeout(timer); button.disabled = false; }
+};
+</script></body></html>
