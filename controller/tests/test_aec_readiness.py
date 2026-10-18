@@ -8,6 +8,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
+from websockets.asyncio.server import ServerConnection
+from websockets.server import ServerProtocol
+from websockets.protocol import State
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import em_realtime_bootstrap as module
 import test_aec_export as export_tests
@@ -61,7 +64,7 @@ class ReadinessHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.shell=ReadinessShell()
         self.api._get_device_shell_ws.return_value=self.shell
         self.api._devices['synthetic']=SimpleNamespace(wake_word_enabled=True,
-            control_ws=SimpleNamespace(closed=False))
+            control_ws=ServerConnection(ServerProtocol(state=State.OPEN),SimpleNamespace()))
         self.api.db=SimpleNamespace(get_wake_word_enabled=lambda device: True)
 
     async def test_disabled_live_or_persisted_wake_is_not_ready(self):
@@ -77,10 +80,17 @@ class ReadinessHandlerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_replaced_control_connection_is_not_ready(self):
         async def replaced(ws):
-            self.api._devices['synthetic'].control_ws=SimpleNamespace(closed=False)
+            self.api._devices['synthetic'].control_ws=ServerConnection(
+                ServerProtocol(state=State.OPEN),SimpleNamespace())
             return {'ready':True,'device_received_enabled':True,'device_applied_enabled':True}
         with patch.object(module,'_aec_readiness',replaced):
             self.assertFalse(json.loads((await self.invoke()).body)['ready'])
+
+    async def test_non_open_real_connection_is_not_ready(self):
+        for state in (State.CONNECTING,State.CLOSING,State.CLOSED):
+            with self.subTest(state=state):
+                self.api._devices['synthetic'].control_ws.protocol.state=state
+                self.assertFalse(json.loads((await self.invoke()).body)['ready'])
 
     async def test_disconnect_during_readback_is_not_ready(self):
         original=self.shell.send

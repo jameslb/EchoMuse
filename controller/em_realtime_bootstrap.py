@@ -189,6 +189,7 @@ def register_aec_export(app, api, auth):
     """Candidate-only admin download; one bounded export, no waiting queue."""
     import asyncio
     from aiohttp import web
+    from websockets.protocol import State
     busy = False
 
     @auth.require_admin
@@ -218,7 +219,7 @@ def register_aec_export(app, api, auth):
                 # The same authenticated live connection must survive the
                 # readback. A cached HA selection cannot establish these facts.
                 if (api._devices.get(device_id) is not live or control is None
-                        or getattr(control, 'closed', True)
+                        or getattr(control, 'state', None) is not State.OPEN
                         or getattr(live, 'control_ws', None) is not control
                         or getattr(live, 'wake_word_enabled', None) is not True
                         or api.db.get_wake_word_enabled(device_id) is not True):
