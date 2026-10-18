@@ -15,13 +15,25 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import em_realtime_bootstrap as module
 import test_aec_export as export_tests
 
-def status(mode='700', file_mode='600', names='permit.local.json', wake=(True,True), **changes):
+def status(mode='700', file_mode='600', names='permit.local.json', wake=(True,True), diagnostic=True, **changes):
     permit={'approved':True,'scope':'one-dot-aec-uplink','expires_at':1100,'maximum_seconds':20}
     permit.update(changes)
     values=['"wakeWordEnabled":'+json.dumps(v) for v in wake]
-    return '\n'.join((mode,file_mode,'1000',names,*values,json.dumps(permit)))
+    state={'version':1,'pid':123,'start_ticks':'456','available':True}
+    fields=['0']*22;fields[19]='456'
+    extra=[json.dumps(state),'123 (server) '+' '.join(fields)] if diagnostic else []
+    return '\n'.join((mode,file_mode,'1000',names,*values,*extra,json.dumps(permit)))
 
 class ReadinessTests(unittest.TestCase):
+    def test_fresh_permit_without_process_availability_is_not_ready(self):
+        self.assertFalse(module.validate_aec_readiness(status(diagnostic=False))['ready'])
+
+    def test_used_or_stale_process_cannot_pass_with_fresh_permit(self):
+        for before,after in [('"available": true','"available": false'),
+                             ('"pid": 123','"pid": 999'),
+                             ('"start_ticks": "456"','"start_ticks": "123"')]:
+            self.assertFalse(module.validate_aec_readiness(status().replace(before,after))['ready'])
+
     def test_actual_0755_directory_rejected_despite_valid_armed_permit(self):
         result=module.validate_aec_readiness(status(mode='755'))
         self.assertFalse(result['ready'])

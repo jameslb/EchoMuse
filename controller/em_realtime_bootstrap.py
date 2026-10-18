@@ -68,7 +68,7 @@ def validate_aec_readiness(raw):
     if not isinstance(raw, str) or len(raw) > 4608:
         return failed
     try:
-        directory_mode, permit_mode, clock, names, wake_a, wake_b, content = raw.strip().split('\n', 6)
+        directory_mode, permit_mode, clock, names, wake_a, wake_b, state, process, content = raw.strip().split('\n', 8)
         if directory_mode != '700':
             return {'ready': False, 'reason': 'private_directory_required'}
         if permit_mode != '600' or names != 'permit.local.json':
@@ -77,6 +77,18 @@ def validate_aec_readiness(raw):
         # do not depend on JSON member order or expose the rest of the config.
         if [wake_a, wake_b] != ['"wakeWordEnabled":true'] * 2:
             return {'ready': False, 'reason': 'device_wake_not_enabled'}
+        diagnostic = json.loads(state)
+        # This is a process-lifetime fuse, independent of a fresh permit or
+        # archived capture directory. A stale report must not pass after reuse
+        # of a PID. The stat read is from the live server process on the device.
+        pid, rest = process.split(' ', 1)
+        stat = rest.rsplit(')', 1)[1].split()
+        if (not isinstance(diagnostic, dict) or diagnostic.get('version') != 1
+                or type(diagnostic.get('pid')) is not int
+                or diagnostic['pid'] != int(pid)
+                or diagnostic.get('start_ticks') != stat[19]
+                or diagnostic.get('available') is not True):
+            return {'ready': False, 'reason': 'diagnostic_process_unavailable'}
         now = int(clock)
         permit = json.loads(content)
         if (set(permit) != {'approved','scope','expires_at','maximum_seconds'}
@@ -86,12 +98,13 @@ def validate_aec_readiness(raw):
                 or type(permit['expires_at']) is not int
                 or not now < permit['expires_at'] <= now + 300):
             return failed
-    except (ValueError, TypeError, KeyError):
+    except (ValueError, TypeError, KeyError, IndexError):
         return failed
     return {'ready': True, 'checked_device_unix_s': now,
             'expires_at': permit['expires_at'], 'maximum_seconds': 20,
             'directory_mode': directory_mode, 'permit_mode': permit_mode,
-            'device_received_enabled': True, 'device_applied_enabled': True}
+            'device_received_enabled': True, 'device_applied_enabled': True,
+            'diagnostic_process': diagnostic}
 
 
 async def _aec_readiness(ws):
@@ -106,6 +119,8 @@ async def _aec_readiness(ws):
                f"busybox stat -c '%a' {root} {permit}; busybox date +%s; "
                f'busybox ls -A {root}; '
                "busybox grep -o '\"wakeWordEnabled\":[a-z]*' /tmp/em-config.json; "
+               'busybox head -c 1025 /tmp/em-aec-status.json; printf "\\n"; '
+               'busybox head -c 1025 /proc/$(busybox pidof server)/stat; '
                f'busybox head -c 4097 {permit}; fi; '
                f"printf '\\n{marker}\\n'\n")
     await ws.send(command)

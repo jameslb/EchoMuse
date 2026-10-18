@@ -54,20 +54,21 @@ type Meta struct {
 }
 
 type Recorder struct {
-	mu        sync.Mutex
-	active    atomic.Bool
-	used      bool
-	session   uint32
-	stream    [16]byte
-	deadline  time.Time
-	startedNS int64
-	root      string
-	pcm       []byte
-	rows      []Meta
-	limit     int
-	timer     *time.Timer
-	done      chan struct{}
-	err       error
+	mu         sync.Mutex
+	active     atomic.Bool
+	used       bool
+	statusPath string
+	session    uint32
+	stream     [16]byte
+	deadline   time.Time
+	startedNS  int64
+	root       string
+	pcm        []byte
+	rows       []Meta
+	limit      int
+	timer      *time.Timer
+	done       chan struct{}
+	err        error
 }
 
 func (r *Recorder) Active() bool    { return r.active.Load() }
@@ -120,6 +121,12 @@ func (r *Recorder) Start(root string, session uint32, stream [16]byte, lease tim
 		return err
 	}
 	r.used = true
+	// A consumed recorder must never be advertised as available. Failure stops
+	// this diagnostic before retaining PCM, while leaving normal audio intact.
+	if err = r.publishStatusLocked(); err != nil {
+		_ = os.Remove(r.statusPath)
+		return err
+	}
 	r.root, r.session, r.stream = root, session, stream
 	r.limit = p.MaximumSeconds * 16000
 	r.deadline = now.Add(time.Duration(p.MaximumSeconds) * time.Second)

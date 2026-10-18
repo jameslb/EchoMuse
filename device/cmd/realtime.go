@@ -16,6 +16,9 @@ import (
 // Existing mutually authenticated control/data connections only. No listener,
 // new credentials, mic_start or lease renewal. Hardware mute remains sovereign.
 func wireRealtime(ctx context.Context, c *client.ControlClient, d *client.DataClient, p *speaker.PcmSpeaker, muted func() bool) {
+	if err := d.AECProbe.PublishStatus(aecdiag.StatusPath); err != nil {
+		log.Printf("[aecdiag] availability report failed: %v", err)
+	}
 	var mu sync.Mutex
 	var session uint32
 	allowed := func() bool {
@@ -42,7 +45,9 @@ func wireRealtime(ctx context.Context, c *client.ControlClient, d *client.DataCl
 			if p.OpenRealtime(command.Stream, deadline) == nil {
 				session = command.Session
 				// Missing/invalid/consumed permit leaves capture disabled.
-				_ = d.AECProbe.Start(aecdiag.Root, session, command.Stream, deadline)
+				if err := d.AECProbe.Start(aecdiag.Root, session, command.Stream, deadline); err != nil {
+					log.Printf("[aecdiag] capture unavailable: %v", err)
+				}
 			}
 			return
 		}
