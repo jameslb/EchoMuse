@@ -69,6 +69,7 @@ type PcmSpeaker struct {
 	// statusFile its substream's status in procfs.
 	pcm        board.PCMAddr
 	statusFile string
+	pcmOwner   pcmOwnership
 	session    *tinyalsa.AudioSession
 	stopCh     chan struct{}
 	// jackInserted is the plug position last applied by SetJackRouting, and
@@ -309,11 +310,16 @@ func (p *PcmSpeaker) Init() error {
 		SilenceThreshold: alsaBufferFrames,
 	})
 
-	session, err := device.NewAudioSession()
+	err := p.pcmOwner.open(func() error {
+		session, err := device.NewAudioSession()
+		if err == nil {
+			p.session = &session
+		}
+		return err
+	})
 	if err != nil {
 		return err
 	}
-	p.session = &session
 
 	go p.silenceLoop()
 

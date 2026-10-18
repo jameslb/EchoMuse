@@ -99,7 +99,7 @@ func (p *PcmSpeaker) realtimePosition() (pcmPosition, bool) {
 	if err != nil {
 		return pcmPosition{}, false
 	}
-	return pcmPlaybackPosition(string(b), uint64(os.Getpid()))
+	return p.pcmOwner.position(string(b))
 }
 
 // The lifecycle lock spans prepare, mix, AEC tap and both hardware writes. Thus a
