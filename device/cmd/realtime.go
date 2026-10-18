@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"log"
 	"sync"
 	"time"
 
@@ -25,14 +26,17 @@ func wireRealtime(ctx context.Context, c *client.ControlClient, d *client.DataCl
 		mu.Lock()
 		defer mu.Unlock()
 		if command.Type == "rt_close" {
+			p.TraceRealtimeCommand(command.Session, command.Stream, command.Turn, "command_close")
 			if p.CloseRealtimeFor(command.Stream, command.Turn) {
 				d.AECProbe.StopFor(command.Stream)
 			}
 			return
 		}
 		if command.Type == "rt_open" {
+			p.TraceRealtimeCommand(command.Session, command.Stream, command.Turn, "command_open")
 			deadline, ok := d.ListenLease(command.Session)
 			if !ok || muted() || !c.HasFeature(client.RealtimeNativeRate) {
+				p.TraceRealtimeCommand(command.Session, command.Stream, command.Turn, "command_open_ineligible")
 				return
 			}
 			if p.OpenRealtime(command.Stream, deadline) == nil {
@@ -82,10 +86,21 @@ func wireRealtime(ctx context.Context, c *client.ControlClient, d *client.DataCl
 					break
 				}
 				if err := c.SendRealtimeReceipt(event); err != nil {
+					p.TraceRealtimeReceipt(event, false)
 					p.CloseRealtime()
 					d.AECProbe.Stop("control_disconnected")
 					break
 				}
+				p.TraceRealtimeReceipt(event, true)
+			}
+			for {
+				e, ok := p.RealtimeDiagnostic()
+				if !ok {
+					break
+				}
+				log.Printf("[rt-diag] event=%s stream=%x session=%d turn=%d at=%d mono_ns=%d owner=%d written=%d played=%d fence=%d waiting=%t reset=%t closing=%t epoch_changed=%t",
+					e.Event, e.Stream, e.Session, e.Turn, e.At.UnixNano(), e.MonoNS, e.Owner,
+					e.Written, e.Played, e.Fence, e.Waiting, e.Reset, e.Closing, e.EpochChanged)
 			}
 		}
 	}()

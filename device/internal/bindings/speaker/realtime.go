@@ -35,10 +35,12 @@ type realtimePlayback struct {
 	marks          []playbackMark
 	events         []satellite.Receipt
 	closing        *satellite.Receipt
+	diagnostics    realtimeDiagnostics
 }
 
 func (r *realtimePlayback) closeLocked() {
 	if r.receiver != nil {
+		r.trace("closing", r.progress.last)
 		r.receiver.Close()
 		r.closing = &satellite.Receipt{Type: "rt_closed", Stream: hex.EncodeToString(r.stream[:]), Turn: r.turn}
 	}
@@ -57,6 +59,7 @@ func (r *realtimePlayback) open(stream [16]byte, now, expires time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.receiver != nil || r.closing != nil || !expires.After(now) || expires.Sub(now) > 30*time.Second {
+		r.trace("open_rejected", r.progress.last)
 		return errRealtime
 	}
 	q := &satellite.Receiver{}
@@ -67,6 +70,8 @@ func (r *realtimePlayback) open(stream [16]byte, now, expires time.Time) error {
 	r.progress = pcmProgress{}
 	r.partial, r.used, r.marks, r.events = satellite.Chunk{}, 0, nil, nil
 	r.waiting, r.reset, r.fence = true, true, 0
+	r.diagnostics.samples, r.diagnostics.lastSample = 0, time.Time{}
+	r.trace("opened", pcmPosition{})
 	return nil
 }
 
@@ -81,6 +86,7 @@ func (r *realtimePlayback) flush(stream [16]byte, turn uint32) bool {
 	r.turn = turn
 	r.partial, r.used, r.marks, r.events = satellite.Chunk{}, 0, nil, nil
 	r.waiting, r.reset, r.fence = true, true, 0
+	r.trace("flush", r.progress.last)
 	return true
 }
 
@@ -144,6 +150,11 @@ func (r *realtimePlayback) emit(event satellite.Receipt) bool {
 		return false
 	}
 	r.events = append(r.events, event)
+	if event.Type == "rt_ready" {
+		r.trace("rt_ready_queued", r.progress.last)
+	} else if event.Type == "rt_closed" {
+		r.trace("rt_closed_queued", r.progress.last)
+	}
 	return true
 }
 
@@ -155,16 +166,20 @@ func (r *realtimePlayback) observe(p pcmPosition, now time.Time) bool {
 		return false
 	}
 	if !r.progress.observe(p) {
+		r.trace("progress_invalid", p)
 		r.closeLocked()
 		return false
 	}
 	if r.receiver != nil && !now.Before(r.expires) {
+		r.trace("lease_expired", p)
 		r.closeLocked()
 		return false
 	}
 	if r.reset {
 		r.fence, r.reset = p.Written, false
+		r.trace("fence_set", p)
 	}
+	r.tracePosition(p, now)
 	if r.closing != nil {
 		if p.Played >= r.fence {
 			event := *r.closing
@@ -247,6 +262,7 @@ func (r *realtimePlayback) written(before, after pcmPosition, frames, delay int,
 		return false
 	}
 	if after.Written < before.Written || after.Written-before.Written != uint64(frames) || delay < 0 {
+		r.trace("write_boundary_invalid", after)
 		r.closeLocked()
 		return false
 	}

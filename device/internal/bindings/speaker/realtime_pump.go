@@ -3,6 +3,7 @@
 package speaker
 
 import (
+	"encoding/hex"
 	"os"
 	"time"
 
@@ -60,7 +61,37 @@ func (p *PcmSpeaker) RealtimeReceipt() (satellite.Receipt, bool) {
 	}
 	event := p.realtime.events[0]
 	p.realtime.events = p.realtime.events[1:]
+	if event.Type == "rt_ready" || event.Type == "rt_closed" {
+		p.realtime.trace(event.Type+"_dequeued", p.realtime.progress.last)
+	}
 	return event, true
+}
+
+func (p *PcmSpeaker) TraceRealtimeCommand(session uint32, stream [16]byte, turn uint32, event string) {
+	p.realtime.traceCommand(session, stream, turn, event)
+}
+
+func (p *PcmSpeaker) TraceRealtimeReceipt(event satellite.Receipt, sent bool) {
+	if event.Type != "rt_ready" && event.Type != "rt_closed" {
+		return
+	}
+	decoded, err := hex.DecodeString(event.Stream)
+	if err != nil || len(decoded) != 16 {
+		return
+	}
+	var stream [16]byte
+	copy(stream[:], decoded)
+	stage := event.Type + "_sent"
+	if !sent {
+		stage = event.Type + "_send_failed"
+	}
+	p.realtime.traceCommand(0, stream, event.Turn, stage)
+}
+
+func (p *PcmSpeaker) RealtimeDiagnostic() (RealtimeDiagnostic, bool) {
+	p.realtime.mu.Lock()
+	defer p.realtime.mu.Unlock()
+	return p.realtime.diagnostics.take()
 }
 
 func (p *PcmSpeaker) realtimePosition() (pcmPosition, bool) {
@@ -92,6 +123,7 @@ func (p *PcmSpeaker) beginRealtimeCycle() (bool, pcmPosition) {
 	p.voice.flush()
 	position, ok := p.realtimePosition()
 	if !ok {
+		r.trace("status_invalid_before", pcmPosition{})
 		r.closeLocked()
 		return true, pcmPosition{}
 	}
@@ -107,6 +139,7 @@ func (p *PcmSpeaker) endRealtimeCycle(before pcmPosition, marks []playbackMark) 
 	}
 	after, ok := p.realtimePosition()
 	if !ok {
+		r.trace("status_invalid_after", pcmPosition{})
 		r.closeLocked()
 		return
 	}
