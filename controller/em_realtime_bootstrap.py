@@ -68,11 +68,15 @@ def validate_aec_readiness(raw):
     if not isinstance(raw, str) or len(raw) > 4608:
         return failed
     try:
-        directory_mode, permit_mode, clock, names, content = raw.strip().split('\n', 4)
+        directory_mode, permit_mode, clock, names, wake_a, wake_b, content = raw.strip().split('\n', 6)
         if directory_mode != '700':
             return {'ready': False, 'reason': 'private_directory_required'}
         if permit_mode != '600' or names != 'permit.local.json':
             return failed
+        # The report contains received and applied snapshots. Both must be on;
+        # do not depend on JSON member order or expose the rest of the config.
+        if [wake_a, wake_b] != ['"wakeWordEnabled":true'] * 2:
+            return {'ready': False, 'reason': 'device_wake_not_enabled'}
         now = int(clock)
         permit = json.loads(content)
         if (set(permit) != {'approved','scope','expires_at','maximum_seconds'}
@@ -86,7 +90,8 @@ def validate_aec_readiness(raw):
         return failed
     return {'ready': True, 'checked_device_unix_s': now,
             'expires_at': permit['expires_at'], 'maximum_seconds': 20,
-            'directory_mode': directory_mode, 'permit_mode': permit_mode}
+            'directory_mode': directory_mode, 'permit_mode': permit_mode,
+            'device_received_enabled': True, 'device_applied_enabled': True}
 
 
 async def _aec_readiness(ws):
@@ -99,7 +104,9 @@ async def _aec_readiness(ws):
     command = (f'if [ -d {root} ] && [ ! -L {root} ] && '
                f'[ -f {permit} ] && [ ! -L {permit} ]; then '
                f"busybox stat -c '%a' {root} {permit}; busybox date +%s; "
-               f'busybox ls -A {root}; busybox head -c 4097 {permit}; fi; '
+               f'busybox ls -A {root}; '
+               "busybox grep -o '\"wakeWordEnabled\":[a-z]*' /tmp/em-config.json; "
+               f'busybox head -c 4097 {permit}; fi; '
                f"printf '\\n{marker}\\n'\n")
     await ws.send(command)
     output = bytearray()
@@ -195,6 +202,7 @@ def register_aec_export(app, api, auth):
             raise web.HTTPConflict(reason='Diagnostic export or device shell unavailable')
         busy = True
         readiness = request.match_info.route.name == 'phase5-aec-readiness'
+        control = getattr(live, 'control_ws', None)
         try:
             async def collect():
                 # Acquire and release in the SAME task: existing shell ownership
@@ -206,6 +214,23 @@ def register_aec_export(app, api, auth):
                     await api._release_shell_ws(device_id, live)
             body = await asyncio.wait_for(collect(), timeout=60)
             if readiness:
+                import time
+                # The same authenticated live connection must survive the
+                # readback. A cached HA selection cannot establish these facts.
+                if (api._devices.get(device_id) is not live or control is None
+                        or getattr(control, 'closed', True)
+                        or getattr(live, 'control_ws', None) is not control
+                        or getattr(live, 'wake_word_enabled', None) is not True
+                        or api.db.get_wake_word_enabled(device_id) is not True):
+                    body = {'ready': False, 'reason': 'controller_wake_or_connection_unverified'}
+                elif body.get('ready') is True:
+                    body['wake_readiness'] = {
+                        'source': 'authenticated_controller_and_device',
+                        'observed_at': time.time(), 'controller_enabled': True,
+                        'persisted_enabled': True,
+                        'device_received_enabled': body['device_received_enabled'],
+                        'device_applied_enabled': body['device_applied_enabled'],
+                        'same_connection': True}
                 return web.json_response(body, headers={'Cache-Control': 'no-store'})
             return web.Response(body=body, content_type='application/zip', headers={
                 'Content-Disposition': 'attachment; filename="phase5-aec.local.zip"',
