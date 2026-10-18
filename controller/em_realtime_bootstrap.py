@@ -62,6 +62,62 @@ AEC_FILES = {'capture.local.json': 4096, 'aec.s16le': 1_920_000,
              'events.local.jsonl': 512 * 1024}
 
 
+def validate_aec_readiness(raw):
+    """Validate actual device metadata, never a locally asserted armed flag."""
+    failed = {'ready': False, 'reason': 'invalid_device_readback'}
+    if not isinstance(raw, str) or len(raw) > 4608:
+        return failed
+    try:
+        directory_mode, permit_mode, clock, names, content = raw.strip().split('\n', 4)
+        if directory_mode != '700':
+            return {'ready': False, 'reason': 'private_directory_required'}
+        if permit_mode != '600' or names != 'permit.local.json':
+            return failed
+        now = int(clock)
+        permit = json.loads(content)
+        if (set(permit) != {'approved','scope','expires_at','maximum_seconds'}
+                or permit['approved'] is not True
+                or permit['scope'] != 'one-dot-aec-uplink'
+                or type(permit['maximum_seconds']) is not int or permit['maximum_seconds'] != 20
+                or type(permit['expires_at']) is not int
+                or not now < permit['expires_at'] <= now + 300):
+            return failed
+    except (ValueError, TypeError, KeyError):
+        return failed
+    return {'ready': True, 'checked_device_unix_s': now,
+            'expires_at': permit['expires_at'], 'maximum_seconds': 20,
+            'directory_mode': directory_mode, 'permit_mode': permit_mode}
+
+
+async def _aec_readiness(ws):
+    import asyncio
+    import secrets
+    root = AEC_ROOT
+    permit = root + '/permit.local.json'
+    marker = '__AEC_READY_' + secrets.token_hex(12) + '__'
+    # Fixed read-only paths. No permit creation, chmod, capture, or audio output.
+    command = (f'if [ -d {root} ] && [ ! -L {root} ] && '
+               f'[ -f {permit} ] && [ ! -L {permit} ]; then '
+               f"busybox stat -c '%a' {root} {permit}; busybox date +%s; "
+               f'busybox ls -A {root}; busybox head -c 4097 {permit}; fi; '
+               f"printf '\\n{marker}\\n'\n")
+    await ws.send(command)
+    output = bytearray()
+    sentinel = ('\n' + marker + '\n').encode()
+    async def receive():
+        while True:
+            value = await ws.recv()
+            output.extend(value.encode('ascii') if isinstance(value, str) else value)
+            if len(output) > 8192:
+                raise ValueError('Readiness response exceeds bound')
+            if sentinel in output:
+                before, after = bytes(output).split(sentinel, 1)
+                if after.strip():
+                    raise ValueError('Unexpected readiness suffix')
+                return validate_aec_readiness(before.decode('ascii'))
+    return await asyncio.wait_for(receive(), timeout=10)
+
+
 async def _read_aec_file(ws, name):
     import asyncio
     import base64
@@ -138,16 +194,19 @@ def register_aec_export(app, api, auth):
                 or (lock and lock.locked())):
             raise web.HTTPConflict(reason='Diagnostic export or device shell unavailable')
         busy = True
+        readiness = request.match_info.route.name == 'phase5-aec-readiness'
         try:
             async def collect():
                 # Acquire and release in the SAME task: existing shell ownership
                 # is task-bound. Cancellation must release only our own session.
                 try:
                     ws = await api._get_device_shell_ws(live)
-                    return await _aec_archive(ws)
+                    return await (_aec_readiness(ws) if readiness else _aec_archive(ws))
                 finally:
                     await api._release_shell_ws(device_id, live)
             body = await asyncio.wait_for(collect(), timeout=60)
+            if readiness:
+                return web.json_response(body, headers={'Cache-Control': 'no-store'})
             return web.Response(body=body, content_type='application/zip', headers={
                 'Content-Disposition': 'attachment; filename="phase5-aec.local.zip"',
                 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff'})
@@ -158,3 +217,5 @@ def register_aec_export(app, api, auth):
             busy = False
 
     app.router.add_get('/api/phase5/aec/{id}', export, allow_head=False)
+    app.router.add_get('/api/phase5/aec-readiness/{id}', export,
+                      name='phase5-aec-readiness', allow_head=False)

@@ -5,36 +5,44 @@
 <body><h1>Saved AEC diagnostic</h1>
 <p>Download the completed private capture from this device. This does not start recording or playback. Close its console first.</p>
 <label for="device">Device ID from the dashboard</label><input id="device" autocomplete="off" spellcheck="false">
+<button id="check">Check capture readiness</button>
 <button id="download">Download saved capture</button><p id="status" role="status"></p>
 <script>
 'use strict';
 const button = document.getElementById('download');
+const check = document.getElementById('check');
 const status = document.getElementById('status');
-button.onclick = async () => {
-  if (button.disabled) return;
+async function request(readiness) {
+  if (button.disabled || check.disabled) return;
   const id = document.getElementById('device').value.trim();
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) { status.textContent = 'Enter the exact device ID.'; return; }
   // Same Bearer-only session and same-origin route as dashboard API.blob.
   // Credentials never enter URLs, downloads, messages or logs.
   const token = localStorage.getItem('em_token');
   if (!token) { status.textContent = 'Sign in through the normal dashboard first.'; return; }
-  button.disabled = true;
-  status.textContent = 'Collecting the saved capture…';
+  button.disabled = check.disabled = true;
+  status.textContent = readiness ? 'Checking the device directory and existing permit…' : 'Collecting the saved capture…';
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), 65000);
   try {
-    const response = await fetch('../api/phase5/aec/' + encodeURIComponent(id), {
+    const response = await fetch('../api/phase5/' + (readiness ? 'aec-readiness/' : 'aec/') + encodeURIComponent(id), {
       headers: {Authorization: 'Bearer ' + token}, signal: abort.signal, cache: 'no-store'});
     if (!response.ok) throw new Error('Export failed (HTTP ' + response.status + '). No automatic retry.');
     const blob = await response.blob();
-    if (blob.size === 0 || blob.size > 2500000) throw new Error('Invalid archive size.');
+    if (blob.size === 0 || blob.size > (readiness ? 4096 : 2500000)) throw new Error('Invalid response size.');
+    const receipt = readiness ? JSON.parse(await blob.text()) : null;
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
-    link.href = url; link.download = 'phase5-aec.local.zip'; link.click();
+    link.href = url; link.download = readiness ? 'phase5-aec-readiness.local.json' : 'phase5-aec.local.zip'; link.click();
     setTimeout(() => URL.revokeObjectURL(url), 60000);
-    status.textContent = 'Saved capture downloaded. Keep it private; playback quality still requires review.';
+    status.textContent = readiness
+      ? (receipt.ready === true ? 'Device capture prerequisites verified. No recording or playback was started.'
+        : 'Capture is NOT ready. Check the downloaded receipt; do not run a prompt.')
+      : 'Saved capture downloaded. Keep it private; playback quality still requires review.';
   } catch (error) {
     status.textContent = error.name === 'AbortError' ? 'Export timed out. No automatic retry.' : error.message;
-  } finally { clearTimeout(timer); button.disabled = false; }
-};
+  } finally { clearTimeout(timer); button.disabled = check.disabled = false; }
+}
+button.onclick = () => request(false);
+check.onclick = () => request(true);
 </script></body></html>
