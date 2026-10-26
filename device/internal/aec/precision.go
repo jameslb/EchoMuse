@@ -11,6 +11,10 @@ import (
 // stays at unity gain. ADC saturation still freezes Speex adaptation.
 // This entry point is for the confirmed hardware-reference path only.
 func (c *Canceller) ProcessMicsFloatWithRef(mics [][]float32, active int, ref []byte, gain float64) []byte {
+	return c.processMicsFloat(mics, active, ref, gain, nil)
+}
+
+func (c *Canceller) processMicsFloat(mics [][]float32, active int, ref []byte, gain float64, observation *FilterDiagnostic) []byte {
 	if active < 0 || active >= len(mics) {
 		return nil
 	}
@@ -21,6 +25,9 @@ func (c *Canceller) ProcessMicsFloatWithRef(mics [][]float32, active int, ref []
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if observation != nil {
+		defer func() { *observation = c.diagnosticStateLocked() }()
+	}
 	if !valid || !c.enabled || !c.hwRef || c.st == nil {
 		if c.enabled && c.hwRef {
 			c.hwMissing++
@@ -37,6 +44,7 @@ func (c *Canceller) ProcessMicsFloatWithRef(mics [][]float32, active int, ref []
 			c.farQuiet = 0
 		}
 		c.hwFrames++
+		c.diagnostic.HardwareFrames++
 		for k := 1; k <= NumMics; k++ {
 			ch := (active + k) % NumMics
 			if ch != active && c.farQuiet > quietHold {

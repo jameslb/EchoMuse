@@ -47,6 +47,24 @@ def fixture():
 
 
 class TransferTests(unittest.IsolatedAsyncioTestCase):
+    async def test_precision_archive_requires_complete_hashed_finite_input(self):
+        import struct
+        files=fixture();manifest=json.loads(files['capture.local.json'])
+        raw=struct.pack('<f',1.0/256)*320*7
+        manifest.update(version=3,channels=['selected_gain_monitor','selected_post_aec','hardware_reference'],
+            microphone_format='float32-le-s16-units',microphone_channels=7,
+            microphone_sha256=hashlib.sha256(raw).hexdigest(),
+            initial_signal_history_captured=False,learned_filter_bytes_captured=False)
+        files['capture.local.json']=json.dumps(manifest).encode();files['microphones.f32le']=raw
+        packed=await module._aec_archive(Shell(files))
+        with zipfile.ZipFile(io.BytesIO(packed)) as archive:
+            self.assertEqual(archive.read('microphones.f32le'),raw)
+        for altered in (raw[:-4],struct.pack('<f',float('nan'))*320*7,struct.pack('<f',32768)*320*7):
+            files['microphones.f32le']=altered
+            manifest['microphone_sha256']=hashlib.sha256(altered).hexdigest()
+            files['capture.local.json']=json.dumps(manifest).encode()
+            with self.assertRaises(ValueError):await module._aec_archive(Shell(files))
+
     async def test_float_monitor_archive_and_mismatched_channel_version(self):
         files = fixture()
         manifest = json.loads(files['capture.local.json'])

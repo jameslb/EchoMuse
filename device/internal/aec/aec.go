@@ -103,6 +103,7 @@ type Canceller struct {
 	// picks has already learnt its own path. Costs 6.04ms per 32ms period on
 	// the device, 19% of a core (JOURNAL 2026-10-03).
 	micStates       [NumMics]*C.SpeexEchoState
+	diagnostic      FilterDiagnostic
 	lastMicsSaveTry time.Time
 	// farQuiet counts consecutive bit-exact silent reference frames, and
 	// micFrames the per-microphone cancellations run. Past quietHold the
@@ -333,6 +334,7 @@ func (c *Canceller) SetParams(enabled bool, delayMs, tailMs int) {
 // use. What was learnt is discarded: it is worthless across a length change.
 func (c *Canceller) buildLocked() {
 	c.freeLocked()
+	c.diagnostic = FilterDiagnostic{Generation: c.diagnostic.Generation + 1, LoadStatus: "not_attempted"}
 	c.stTailMs = c.effectiveTailLocked()
 	tailSamples := C.int(c.stTailMs * sampleRate / 1000)
 	c.st = C.speex_echo_state_init(C.int(FrameSize), tailSamples)
@@ -475,9 +477,17 @@ func (c *Canceller) ProcessWithRef(mono, ref []byte) []byte {
 }
 
 func (c *Canceller) process(mono, hwref []byte) []byte {
+	return c.processObserved(mono, hwref, nil)
+}
+
+func (c *Canceller) processObserved(mono, hwref []byte, observation *FilterDiagnostic) []byte {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.processLocked(mono, hwref)
+	out := c.processLocked(mono, hwref)
+	if observation != nil {
+		*observation = c.diagnosticStateLocked()
+	}
+	return out
 }
 
 func (c *Canceller) processLocked(mono, hwref []byte) []byte {

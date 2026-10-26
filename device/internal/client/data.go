@@ -1249,6 +1249,9 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			diagPre := mono
 			diagInputFormat := "gained_s16"
 			diagSelected := d.beam.OutputChannel(beamAngle)
+			var diagMics [][]float32
+			var diagFilter aec.FilterDiagnostic
+			diagPrecision := d.AECProbe.Active() && d.AECProbe.PrecisionActive()
 
 			// AEC — subtract the speaker's own output before anything
 			// measures or gates the signal. No-op while aecEnabled=false.
@@ -1276,10 +1279,20 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 				// a different one each time (#814).
 				sel := d.beam.OutputChannel(beamAngle)
 				mics := beamformer.MicChannelsFloat(raw)
-				mono = d.aec.ProcessMicsFloatWithRef(mics, sel, echoRef, gainLin)
+				if diagPrecision {
+					diagMics = mics
+					mono, diagFilter = d.aec.ProcessMicsFloatDiagnostic(mics, sel, echoRef, gainLin)
+				} else {
+					mono = d.aec.ProcessMicsFloatWithRef(mics, sel, echoRef, gainLin)
+				}
 				diagInputFormat = "unity_f32_s24"
 			} else {
-				mono = d.aec.Process(mono)
+				if diagPrecision {
+					diagMics = beamformer.MicChannelsFloat(raw)
+					mono, diagFilter = d.aec.ProcessDiagnostic(mono)
+				} else {
+					mono = d.aec.Process(mono)
+				}
 			}
 			diagPost := mono
 
@@ -1352,7 +1365,15 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			mono = d.proc.Process(mono, agcEnabled, speech)
 			if d.AECProbe.Active() {
 				if _, open := d.ListenLease(d.AECProbe.Session()); open {
-					d.AECProbe.Capture(aecdiag.Meta{Stream: diagStream, Batch: diagBatch, SampleStart: diagSamples, ReceivedNS: diagReceived, Selected: diagSelected, Clipped: clipped, GainDB: gainDb, AEC: d.aec.Enabled(), Hardware: diagHardware, InputFormat: diagInputFormat}, diagPre, diagPost, echoRef, mono)
+					metadata := aecdiag.Meta{Stream: diagStream, Batch: diagBatch, SampleStart: diagSamples, ReceivedNS: diagReceived, Selected: diagSelected, Clipped: clipped, GainDB: gainDb, AEC: d.aec.Enabled(), Hardware: diagHardware, InputFormat: diagInputFormat}
+					if diagPrecision {
+						metadata.FilterGeneration, metadata.FilterHWFrames = diagFilter.Generation, diagFilter.HardwareFrames
+						metadata.FilterDomain, metadata.FilterLoadStatus = diagFilter.Domain, diagFilter.LoadStatus
+						metadata.FilterLoadSHA256, metadata.FilterLoadBytes = diagFilter.LoadSHA256, diagFilter.LoadBytes
+						d.AECProbe.Capture(metadata, diagPre, diagPost, echoRef, mono, diagMics)
+					} else {
+						d.AECProbe.Capture(metadata, diagPre, diagPost, echoRef, mono)
+					}
 				} else {
 					d.AECProbe.Stop("lease_closed")
 				}

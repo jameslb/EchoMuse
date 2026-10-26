@@ -40,7 +40,7 @@ func (r *Recorder) publishStatusLocked() error {
 		return errors.New("missing process start ticks")
 	}
 	raw, err := json.Marshal(map[string]any{"version": 1, "pid": os.Getpid(),
-		"start_ticks": fields[19], "available": !r.used})
+		"start_ticks": fields[19], "available": !r.used, "full_precision_version": 3})
 	if err != nil {
 		return err
 	}

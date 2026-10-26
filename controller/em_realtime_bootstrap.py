@@ -59,7 +59,7 @@ async def start():
 # and admin API; never creates a permit, records, deletes or executes file data.
 AEC_ROOT = '/data/local/tmp/phase5-aec.local'
 AEC_FILES = {'capture.local.json': 4096, 'aec.s16le': 1_920_000,
-             'events.local.jsonl': 512 * 1024}
+             'events.local.jsonl': 512 * 1024, 'microphones.f32le': 8_960_000}
 
 
 def validate_aec_readiness(raw):
@@ -93,14 +93,17 @@ def validate_aec_readiness(raw):
         permit = json.loads(content)
         if (set(permit) != {'approved','scope','expires_at','maximum_seconds'}
                 or permit['approved'] is not True
-                or permit['scope'] != 'one-dot-aec-uplink'
+                or permit['scope'] not in ('one-dot-aec-uplink','one-dot-aec-fullprecision')
                 or type(permit['maximum_seconds']) is not int or permit['maximum_seconds'] != 20
                 or type(permit['expires_at']) is not int
                 or not now < permit['expires_at'] <= now + 300):
             return failed
+        if permit['scope']=='one-dot-aec-fullprecision' and diagnostic.get('full_precision_version')!=3:
+            return {'ready':False,'reason':'full_precision_capability_required'}
     except (ValueError, TypeError, KeyError, IndexError):
         return failed
-    return {'ready': True, 'checked_device_unix_s': now,
+    return {'ready': True, 'checked_device_unix_s': now, 'scope':permit['scope'],
+            'maximum_microphone_bytes':8_960_000 if permit['scope']=='one-dot-aec-fullprecision' else 0,
             'expires_at': permit['expires_at'], 'maximum_seconds': 20,
             'directory_mode': directory_mode, 'permit_mode': permit_mode,
             'device_received_enabled': True, 'device_applied_enabled': True,
@@ -182,17 +185,30 @@ async def _aec_archive(ws):
     import hashlib
     import io
     import zipfile
-    files = {name: await _read_aec_file(ws, name) for name in AEC_FILES}
+    files = {name: await _read_aec_file(ws, name) for name in AEC_FILES if name!='microphones.f32le'}
     manifest = json.loads(files['capture.local.json'])
     pcm, events = files['aec.s16le'], files['events.local.jsonl']
     version = manifest.get('version')
     first = 'selected_pre_aec' if version == 1 else 'selected_gain_monitor'
-    if (version not in (1, 2) or manifest.get('rate') != 16000
+    if (version not in (1, 2, 3) or manifest.get('rate') != 16000
             or manifest.get('channels') != [first, 'selected_post_aec', 'hardware_reference']
             or len(pcm) % 6 or manifest.get('samples') != len(pcm)//6
             or hashlib.sha256(pcm).hexdigest() != manifest.get('pcm_sha256')
             or hashlib.sha256(events).hexdigest() != manifest.get('events_sha256')):
         raise ValueError('Incomplete or inconsistent AEC evidence')
+    if version==3:
+        import math
+        import struct
+        raw=await _read_aec_file(ws,'microphones.f32le')
+        if (manifest.get('microphone_format')!='float32-le-s16-units'
+                or manifest.get('microphone_channels')!=7
+                or len(raw)!=manifest['samples']*28
+                or hashlib.sha256(raw).hexdigest()!=manifest.get('microphone_sha256')
+                or manifest.get('initial_signal_history_captured') is not False
+                or manifest.get('learned_filter_bytes_captured') is not False
+                or any(not math.isfinite(v) or not -32768<=v<32768 for (v,) in struct.iter_unpack('<f',raw))):
+            raise ValueError('Invalid full-precision capture')
+        files['microphones.f32le']=raw
     output = io.BytesIO()
     with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_STORED) as archive:
         for name, data in files.items():

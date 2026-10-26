@@ -1,7 +1,9 @@
 package aec
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"log"
 	"os"
@@ -127,15 +129,27 @@ func (c *Canceller) loadMicsLocked() {
 	}
 	b, err := os.ReadFile(c.micsPath())
 	if err != nil {
+		c.diagnostic.LoadStatus = "unreadable"
+		if os.IsNotExist(err) {
+			c.diagnostic.LoadStatus = "missing"
+		}
 		if !os.IsNotExist(err) {
 			log.Printf("[aec] saved per-microphone echo paths unreadable, starting cold: %v", err)
 		}
 		return
 	}
+	c.diagnostic.LoadBytes = len(b)
+	// Hash only the bounded expected bank shape; never log file bytes/paths.
+	if len(b) <= 131072 {
+		sum := sha256.Sum256(b)
+		c.diagnostic.LoadSHA256 = hex.EncodeToString(sum[:])
+	}
 	if err := c.importMicsLocked(b); err != nil {
+		c.diagnostic.LoadStatus = "refused"
 		log.Printf("[aec] saved per-microphone echo paths refused, starting cold: %v", err)
 		return
 	}
+	c.diagnostic.LoadStatus = "loaded"
 	log.Printf("[aec] loaded the saved echo paths for %d microphones (%d bytes)", NumMics, len(b))
 }
 
