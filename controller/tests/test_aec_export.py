@@ -164,6 +164,31 @@ class HandlerTests(unittest.IsolatedAsyncioTestCase):
             await self.invoke()
         self.api._get_device_shell_ws.assert_not_awaited()
 
+    async def test_full_precision_admin_export_and_corruption_release(self):
+        import struct
+        files = fixture()
+        raw = struct.pack('<f', 1.0 / 256) * 320 * 7
+        manifest = json.loads(files['capture.local.json'])
+        manifest.update(version=3,
+            channels=['selected_gain_monitor', 'selected_post_aec', 'hardware_reference'],
+            microphone_format='float32-le-s16-units', microphone_channels=7,
+            microphone_sha256=hashlib.sha256(raw).hexdigest(),
+            initial_signal_history_captured=False, learned_filter_bytes_captured=False)
+        files['capture.local.json'] = json.dumps(manifest).encode()
+        files['microphones.f32le'] = raw
+        self.api._get_device_shell_ws.side_effect = lambda live: Shell(files)
+        response = await self.invoke()
+        self.assertEqual(response.status, 200)
+        with zipfile.ZipFile(io.BytesIO(response.body)) as archive:
+            self.assertEqual(set(archive.namelist()), set(files))
+            self.assertEqual(archive.read('microphones.f32le'), raw)
+        files['microphones.f32le'] = raw[:-4]
+        with self.assertRaises(web.HTTPBadGateway):
+            await self.invoke()
+        files['microphones.f32le'] = raw
+        self.assertEqual((await self.invoke()).status, 200)
+        self.assertEqual(self.api._release_shell_ws.await_count, 3)
+
     async def test_failure_and_cancellation_release_owned_shell_same_task(self):
         acquired, released = [], []
         async def acquire(live):

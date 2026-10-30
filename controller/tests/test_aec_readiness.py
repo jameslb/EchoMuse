@@ -90,6 +90,21 @@ class ReadinessHandlerTests(unittest.IsolatedAsyncioTestCase):
             self.api.db.get_wake_word_enabled=lambda device: False
             self.assertFalse(json.loads((await self.invoke()).body)['ready'])
 
+    async def test_full_precision_capability_survives_authenticated_readback(self):
+        from test_aec_precision import readback
+        for capability in (3, None, 2):
+            async def send(command):
+                marker = re.search(r'__AEC_READY_[a-f0-9]+__', command)[0]
+                self.shell.parts = [(readback(capability) + '\n' + marker + '\n').encode()]
+            self.shell.send = send
+            body = json.loads((await self.invoke()).body)
+            self.assertEqual(body['ready'], capability == 3)
+            if capability == 3:
+                self.assertEqual(body['scope'], 'one-dot-aec-fullprecision')
+                self.assertEqual(body['maximum_microphone_bytes'], 8_960_000)
+                self.assertTrue(body['wake_readiness']['same_connection'])
+        self.assertEqual(self.api._release_shell_ws.await_count, 3)
+
     async def test_replaced_control_connection_is_not_ready(self):
         async def replaced(ws):
             self.api._devices['synthetic'].control_ws=ServerConnection(
