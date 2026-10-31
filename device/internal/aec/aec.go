@@ -21,7 +21,7 @@
 package aec
 
 /*
-#cgo CFLAGS: -I${SRCDIR}/include -I${SRCDIR}/src -DFLOATING_POINT -DUSE_KISS_FFT -DEXPORT= -O2
+#cgo CFLAGS: -I${SRCDIR}/include -I${SRCDIR}/src -DFLOATING_POINT -DEM_RESIDUAL_FLOAT_S24=1 -DUSE_KISS_FFT -DEXPORT= -O2
 #cgo LDFLAGS: -lm
 
 #include <stdlib.h>
@@ -30,6 +30,8 @@ package aec
 #include "src/kiss_fft.c"
 #include "src/kiss_fftr.c"
 #include "src/mdf.c"
+#include "src/filterbank.c"
+#include "src/preprocess.c"
 */
 import "C"
 
@@ -91,8 +93,10 @@ type Canceller struct {
 	delayMs int
 	tailMs  int // configured (aecTailMs): the software tap's filter length
 
-	st       *C.SpeexEchoState
-	stTailMs int // the length st was built with: hwTailMs or tailMs
+	residualEnabled bool // experimental component; device startup does not enable it
+	residualStates  [NumMics]*C.SpeexPreprocessState
+	st              *C.SpeexEchoState
+	stTailMs        int // the length st was built with: hwTailMs or tailMs
 
 	// micStates is one echo state per microphone, built with the hardware
 	// reference and used by ProcessMicsWithRef (#814). The echo path from
@@ -372,6 +376,13 @@ func (c *Canceller) seedRingLocked() {
 }
 
 func (c *Canceller) freeLocked() {
+	for i, st := range c.residualStates {
+		if st != nil {
+			C.speex_preprocess_state_destroy(st)
+			c.residualStates[i] = nil
+		}
+	}
+
 	if c.st != nil {
 		C.speex_echo_state_destroy(c.st)
 		c.st = nil
@@ -767,6 +778,22 @@ func (c *Canceller) cancelFloatLocked(channel int) {
 	C.em_echo_cancellation_float(c.micStates[channel],
 		(*C.float)(unsafe.Pointer(&c.floatIn[0])), c.refBuf,
 		(*C.float)(unsafe.Pointer(&c.floatOut[0])))
+	if !c.residualEnabled {
+		return
+	}
+	if c.residualStates[channel] == nil {
+		st := C.speex_preprocess_state_init(C.int(FrameSize), C.int(sampleRate))
+		zero := C.spx_int32_t(0)
+		C.speex_preprocess_ctl(st, C.SPEEX_PREPROCESS_SET_AGC, unsafe.Pointer(&zero))
+		C.speex_preprocess_ctl(st, C.SPEEX_PREPROCESS_SET_VAD, unsafe.Pointer(&zero))
+		C.speex_preprocess_ctl(st, C.SPEEX_PREPROCESS_SET_DEREVERB, unsafe.Pointer(&zero))
+		// Keep the gain stage enabled for echo; 0 dB disables noise attenuation.
+		C.speex_preprocess_ctl(st, C.SPEEX_PREPROCESS_SET_NOISE_SUPPRESS, unsafe.Pointer(&zero))
+		C.speex_preprocess_ctl(st, C.SPEEX_PREPROCESS_SET_ECHO_STATE, unsafe.Pointer(c.micStates[channel]))
+		c.residualStates[channel] = st
+	}
+	C.em_preprocess_run_float(c.residualStates[channel], (*C.float)(unsafe.Pointer(&c.floatOut[0])))
+
 }
 
 func (c *Canceller) setFloatReferenceLocked(ref []byte) bool {
@@ -863,4 +890,26 @@ func (c *Canceller) loadIntoLocked(st *C.SpeexEchoState, b []byte) error {
 		return errors.New("aec: import size mismatch")
 	}
 	return nil
+}
+
+// setResidualSuppression enables an experimental component for package tests.
+// It stays unexported and OFF in device startup until saved-audio interruption
+// and physical acceptance gates pass. This does not change the controller VAD.
+func (c *Canceller) setResidualSuppression(on bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.residualEnabled == on {
+		return
+	}
+	c.residualEnabled = on
+	for i := range c.residualStates {
+		c.resetResidualChannelLocked(i)
+	}
+}
+
+func (c *Canceller) resetResidualChannelLocked(channel int) {
+	if st := c.residualStates[channel]; st != nil {
+		C.speex_preprocess_state_destroy(st)
+		c.residualStates[channel] = nil
+	}
 }

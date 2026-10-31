@@ -48,6 +48,10 @@ func (c *Canceller) processMicsFloat(mics [][]float32, active int, ref []byte, g
 		for k := 1; k <= NumMics; k++ {
 			ch := (active + k) % NumMics
 			if ch != active && c.farQuiet > quietHold {
+				// The echo path can rest after its far-end history is quiet, but
+				// a post-filter's overlap still contains near-end samples. Never
+				// retain that queued frame across a gap in this microphone stream.
+				c.resetResidualChannelLocked(ch)
 				continue
 			}
 			copy(c.floatIn[:], mics[ch][off:off+FrameSize])

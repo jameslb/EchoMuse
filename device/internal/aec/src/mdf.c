@@ -1255,7 +1255,13 @@ void speex_echo_get_residual(SpeexEchoState *st, spx_word32_t *residual_echo, in
 #endif
    /* Estimate residual echo */
    for (i=0;i<=st->frame_size;i++)
+   {
+#ifdef FIXED_POINT
       residual_echo[i] = (spx_int32_t)MULT16_32_Q15(leak2,residual_echo[i]);
+#else
+      residual_echo[i] = MULT16_32_Q15(leak2,residual_echo[i]);
+#endif
+   }
 
 }
 
