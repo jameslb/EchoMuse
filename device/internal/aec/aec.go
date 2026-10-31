@@ -40,6 +40,7 @@ import (
 	"log"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 )
@@ -179,6 +180,10 @@ type Canceller struct {
 	// pushed into the ring while the hardware path is running would be
 	// consumed by nothing and sit there aging.
 	hwRef bool
+	// Mirror for the speaker's WriteFar fast path. Hardware reference needs
+	// no software-ring write, so never wait for the microphone DSP lock.
+	// Upstream v2.18.1 (#870); a racing switch resets the ring anyway.
+	hwRefLive atomic.Bool
 	// Periods cancelled against a hardware reference, and periods where one
 	// was expected and did not arrive (nil, or a length mismatch with the
 	// near end). A rising hwMissing with cancellation on is an extraction
@@ -209,6 +214,7 @@ func (c *Canceller) SetHardwareRef(on bool) {
 		return
 	}
 	c.hwRef = on
+	c.hwRefLive.Store(on)
 	c.head, c.tail, c.count = 0, 0, 0
 	c.dsum, c.dcnt = 0, 0
 	log.Printf("[aec] far-end reference: %s",
@@ -398,6 +404,9 @@ func (c *Canceller) pushLocked(s int16) {
 // crude, but the echo content is voice-band and the canceller adapts to
 // the filter's response like any other part of the echo path).
 func (c *Canceller) WriteFar(period []byte) {
+	if c.hwRefLive.Load() {
+		return
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.enabled {

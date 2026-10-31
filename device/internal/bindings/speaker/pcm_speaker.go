@@ -24,17 +24,7 @@ import (
 
 const periodSize = 2048
 
-// The hardware tier: what ALSA holds ahead of the DAC. It is sized ONLY for
-// this loop's scheduling lateness — WiFi is the deep queue's job — and every
-// frame of it is latency a duck cannot touch, since ducking happens as audio
-// leaves the deep queue. It was 4 x 2048 (171ms). Measured on VVV 2026-09-22
-// under music, wake scoring, the output chain and turns: the loop was never
-// more than 19ms late (worst gap 61.7ms against a 42.7ms period). 4 x 1024 is
-// 85ms. Each mixed period is written as two halves, so the mix cadence, the
-// stream units and the wire are all unchanged.
-const alsaPeriodSize = 1024
-const alsaPeriodCount = 4
-const alsaBufferFrames = alsaPeriodSize * alsaPeriodCount
+// Hardware buffer policy is shared with the host-runnable regression tests.
 const periodBytes = periodSize * 2 * 2 // 2 channels * 2 bytes = 8192
 
 // The wire carries MONO 48kHz — PumpPeriod duplicates L=R before queueing.
@@ -785,7 +775,7 @@ func (p *PcmSpeaker) EndMusicStream() { p.music.endStream() }
 //     ~1.3s skip). The controller sends the EOS on the cancel path too, so
 //     the discard always terminates.
 //
-// Up to alsaBufferFrames (~85ms) already handed to the hardware
+// Up to alsaBufferFrames (~171ms) already handed to the hardware
 // still play — cutting those needs a stream restart, which costs more in
 // click/pop than it saves.
 func (p *PcmSpeaker) Flush() { p.voice.flush() }
