@@ -52,6 +52,9 @@ func DecodeRealtimeCommand(raw []byte) (RealtimeCommand, error) {
 // An older controller never announces the feature, so receives native behavior.
 func (c *ControlClient) registerCapabilities() []string {
 	caps := capabilities()
+	if c.pairedCommand != nil {
+		caps = append(caps, "phase5_paired_aec_input_v1")
+	}
 	if c.realtimeCallback != nil {
 		caps = append(caps, RealtimeCapability, RealtimeNativeRate)
 	}

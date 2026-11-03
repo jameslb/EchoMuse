@@ -16,6 +16,9 @@ import (
 // Existing mutually authenticated control/data connections only. No listener,
 // new credentials, mic_start or lease renewal. Hardware mute remains sovereign.
 func wireRealtime(ctx context.Context, c *client.ControlClient, d *client.DataClient, p *speaker.PcmSpeaker, muted func() bool) {
+	if pairedInputExperimental {
+		d.EnablePairedInput(ctx, c, muted)
+	}
 	if err := d.AECProbe.PublishStatus(aecdiag.StatusPath); err != nil {
 		log.Printf("[aecdiag] availability report failed: %v", err)
 	}
@@ -31,6 +34,7 @@ func wireRealtime(ctx context.Context, c *client.ControlClient, d *client.DataCl
 		if command.Type == "rt_close" {
 			p.TraceRealtimeCommand(command.Session, command.Stream, command.Turn, "command_close")
 			if p.CloseRealtimeFor(command.Stream, command.Turn) {
+				d.ClosePairedInputForStream(command.Stream)
 				d.AECProbe.StopFor(command.Stream)
 			}
 			return

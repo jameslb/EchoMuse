@@ -105,8 +105,11 @@ type WifiChangeCallback func(ssid []byte, psk string)
 // ─── ControlClient ────────────────────────────────────────────────────────────
 
 type ControlClient struct {
-	realtimeCallback func(RealtimeCommand)
-	deviceID         string
+	pairedCommand       func([]byte)
+	pairedControlSerial atomic.Uint64
+	pairedClosed        func()
+	realtimeCallback    func(RealtimeCommand)
+	deviceID            string
 
 	ledCallback           LEDCallback
 	ledAnimCallback       LEDAnimCallback
@@ -716,11 +719,16 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 
 	c.connMu.Lock()
 	c.conn = conn
+	c.pairedControlSerial.Add(1)
 	c.connMu.Unlock()
 	defer func() {
+		c.pairedControlSerial.Add(1)
 		c.connMu.Lock()
 		c.conn = nil
 		c.connMu.Unlock()
+		if c.pairedClosed != nil {
+			c.pairedClosed()
+		}
 	}()
 
 	if c.connectedCallback != nil {
@@ -990,6 +998,10 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 			reply["type"] = "sendspin_token"
 			c.writeJSON(reply)
 
+		case "pair_open", "pair_ack", "pair_close":
+			if c.pairedCommand != nil && c.HasFeature("phase5_paired_aec_input_v1") {
+				c.pairedCommand(raw)
+			}
 		case "rt_open", "rt_flush", "rt_close":
 			if c.realtimeCallback != nil && c.HasFeature(RealtimeCapability) {
 				if command, err := DecodeRealtimeCommand(raw); err == nil {

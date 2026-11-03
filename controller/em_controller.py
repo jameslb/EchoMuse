@@ -4588,7 +4588,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         await device.send_control({
             "type": "ack",
             "device_id": device_id,
-            "features": CONTROLLER_FEATURES + (list(em_realtime.CAPABILITIES) if device.realtime else []),
+            "features": CONTROLLER_FEATURES + (list(device.realtime.capabilities()) if device.realtime else []),
             # The device's wall clock. An Echo has no RTC that survives a
             # power cut and boots reading 2010; under emOS nothing ever
             # corrects it, because bionic resolves through Android's property
@@ -5686,6 +5686,10 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
                 if raw and raw[0] == BLE_GATT_TYPE:
                     em_ble_proxy.gatt_from_device(device.device_id, raw[1:])
                     continue
+                if raw and raw[0] == em_realtime.PAIRED_FRAME_TYPE:
+                    if device.realtime is not None:
+                        await device.realtime.paired_frame(raw[1:])
+                    continue # never deliver experimental paired data to native STT
                 if raw and raw[0] == em_listen.FRAME_TYPE:
                     if device.realtime is not None and await device.realtime.frame(raw):
                         continue

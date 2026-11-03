@@ -16,6 +16,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/beamformer"
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/listen"
+	"github.com/wilbowes/EchoMuse/internal/pairedinput"
 	"github.com/wilbowes/EchoMuse/internal/processor"
 	"github.com/wilbowes/EchoMuse/internal/wakeword/ort"
 	"github.com/wilbowes/EchoMuse/internal/wakeword/shadow"
@@ -180,6 +181,8 @@ const (
 )
 
 type DataClient struct {
+	paired               *pairedinput.Sender // nil unless explicitly enabled; no default advertisement
+	pairedMicSerial      atomic.Uint64
 	realtimeFrame        func([]byte) error
 	realtimeDisconnected func()
 	deviceID             string
@@ -732,6 +735,9 @@ func (d *DataClient) resumeMic() {
 }
 
 func (d *DataClient) StopMic() {
+	if d.paired != nil {
+		d.paired.Close()
+	}
 	d.stopMic()
 	// A session cannot outlive the stream carrying it. After the unlock:
 	// reporting it writes to the control plane.
@@ -854,6 +860,9 @@ func (d *DataClient) connect(ctx context.Context, baseURL string) error {
 
 		d.connMu.Lock()
 		if d.conn == conn {
+			if d.paired != nil {
+				d.paired.ResetLink()
+			}
 			if d.realtimeDisconnected != nil {
 				d.realtimeDisconnected()
 			}
@@ -1279,7 +1288,7 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 				// a different one each time (#814).
 				sel := d.beam.OutputChannel(beamAngle)
 				mics := beamformer.MicChannelsFloat(raw)
-				if diagPrecision {
+				if diagPrecision || d.paired != nil {
 					diagMics = mics
 					mono, diagFilter = d.aec.ProcessMicsFloatDiagnostic(mics, sel, echoRef, gainLin)
 				} else {
@@ -1287,7 +1296,7 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 				}
 				diagInputFormat = "unity_f32_s24"
 			} else {
-				if diagPrecision {
+				if diagPrecision || d.paired != nil {
 					diagMics = beamformer.MicChannelsFloat(raw)
 					mono, diagFilter = d.aec.ProcessDiagnostic(mono)
 				} else {
@@ -1295,6 +1304,9 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 				}
 			}
 			diagPost := mono
+			if d.paired != nil {
+				d.offerPaired(diagPost, echoRef, gainLin, diagFilter, diagHardware, diagSamples, diagReceived, diagStream)
+			}
 
 			// ── Processing pipeline ──────────────────────────────────────
 			// VAD on raw beamformed output — pre-NS/AGC so threshold is

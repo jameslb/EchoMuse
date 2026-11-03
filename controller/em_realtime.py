@@ -11,17 +11,21 @@ import logging
 import math
 
 CAPABILITIES = ('realtime_playback_v1', 'realtime_pcm_48000_v1')
+PAIRED_CAPABILITY = 'phase5_paired_aec_input_v1'
+PAIRED_FRAME_TYPE = 10
 _factories = {}
 
 
-def register(device_id, factory, *, strict_wake=False):
+def register(device_id, factory, *, strict_wake=False, paired_input=False):
     if not isinstance(device_id, str) or not device_id or not callable(factory):
         raise ValueError('Explicit device identity and route factory required')
     if device_id in _factories:
         raise ValueError('Device already registered')
     if type(strict_wake) is not bool:
         raise ValueError('Explicit boolean wake policy required')
-    _factories[device_id] = (factory, strict_wake)
+    if type(paired_input) is not bool:raise ValueError('Explicit paired policy required')
+    if paired_input and not strict_wake:raise ValueError('Paired candidate requires strict wake ownership')
+    _factories[device_id] = (factory, strict_wake, paired_input)
     logging.getLogger('echomuse.realtime').info(
         'Candidate registered; strict_wake=%s', strict_wake)
 
@@ -42,12 +46,14 @@ def attach(device, claim_wake):
     if (registration is None or not device.secure or
             not set((*CAPABILITIES, 'oww_local_only')).issubset(device.capabilities)):
         return None
-    factory, strict_wake = registration
-    return Binding(device, factory, claim_wake, strict_wake=strict_wake)
+    factory, strict_wake, paired_input = registration
+    if paired_input and PAIRED_CAPABILITY not in device.capabilities:return None
+    return Binding(device, factory, claim_wake, strict_wake=strict_wake, paired_input=paired_input)
 
 
 class Binding:
-    def __init__(self, device, factory, claim_wake, *, strict_wake=False):
+    def __init__(self, device, factory, claim_wake, *, strict_wake=False, paired_input=False):
+        if paired_input and not strict_wake:raise ValueError('Paired candidate requires strict wake ownership')
         self.device = device
         self.control_ws = device.control_ws
         self.data_ws = None
@@ -59,9 +65,32 @@ class Binding:
         self.claim_wake = claim_wake
         self.factory = factory
         self.strict_wake = strict_wake
+        self.paired = None
+        options={}
+        if paired_input:
+            from em_paired_input import PairedInput
+            self.paired=PairedInput(self.send_control,self._paired_allowed)
+            options['paired_input']=self.paired
         self.route = factory(self.send_control, self.send_data,
                              capabilities=tuple(device.capabilities),
-                             private_state='local', exclusive=True)
+                             private_state='local', exclusive=True, **options)
+
+    def capabilities(self):
+        return (*CAPABILITIES,PAIRED_CAPABILITY) if self.paired is not None else CAPABILITIES
+
+    def _paired_allowed(self):
+        return (self.eligible() and self.session is not None and not self.device.oww_paused.is_set()
+                and (self.paired.identity is None or self.paired.identity['session']==self.session)
+                and PAIRED_CAPABILITY in self.device.capabilities
+                and self.device.control_ws is self.control_ws and self.data_ws is not None
+                and self.device.data_ws is self.data_ws)
+
+    async def paired_frame(self,packet):
+        if self.paired is None:return False
+        try:return self.paired.frame(packet)
+        except (ValueError,PermissionError,BufferError):
+            if self.paired.retired:await self.close()
+            return False
 
     @property
     def active(self):
@@ -74,8 +103,14 @@ class Binding:
     async def send_control(self, message):
         if self.device.control_ws is not self.control_ws:
             raise ConnectionError('Retired controller link')
-        if message.get('type') not in {'rt_open','rt_flush','rt_close','listen_ack','listen_close'}:
+        commands={'rt_open','rt_flush','rt_close','listen_ack','listen_close'}
+        if self.paired is not None:commands.update({'pair_open','pair_ack','pair_close'})
+        if message.get('type') not in commands:
             raise ValueError('Command outside realtime transport')
+        if message.get('type','').startswith('pair_') and (not self._paired_allowed() or message.get('session')!=self.session):
+            raise PermissionError('Paired command outside active session')
+        if (self.paired is not None and message.get('type')=='listen_close'
+                and message.get('session')==self.session):self.paired.revoke()
         async with asyncio.timeout(.5):
             # Native send_control catches errors; a receipt-driven route must
             # propagate them. Never substitute a replacement connection here.
@@ -110,7 +145,7 @@ class Binding:
                 and self.device.control_ws is self.control_ws
                 and self.device.data_ws is self.data_ws):
             binding = Binding(self.device, self.factory, self.claim_wake,
-                              strict_wake=self.strict_wake)
+                              strict_wake=self.strict_wake,paired_input=self.paired is not None)
             self.device.realtime = binding
             return binding
         return None
@@ -121,6 +156,8 @@ class Binding:
             async with asyncio.timeout(2):
                 claimed = await self.claim_wake(self.device, event)
             event['ageMs'] += (asyncio.get_running_loop().time()-arrived)*1000
+            if claimed and self.eligible() and self.session==event['session'] and self.paired is not None and self.paired.retired:
+                self.paired.rearm_for_wake(event['session'])
             if (not claimed or not self.eligible() or self.session != event['session']
                     or not await self.route.wake(event)):
                 await self.send_control({'type':'listen_close','session':event['session'],
@@ -130,6 +167,17 @@ class Binding:
 
     async def control(self, event):
         kind = event.get('type')
+        if kind=='pair_closed' and self.paired is not None:
+            if self.paired.closed(event):await self.close()
+            return True
+        if kind=='pair_ready' and self.paired is not None:
+            try:await self.paired.ready(event)
+            except (ValueError,KeyError,TypeError,PermissionError,ConnectionError):await self.close()
+            return True
+        if self.paired is not None and (kind=='listen_end' and event.get('session')==self.session
+                or kind=='mute_state' and event.get('muted') is True
+                or kind=='listen_state' and event.get('state')!='local'):
+            self.paired.revoke()
         if kind == 'oww_wake':
             replacement = self.replacement()
             if replacement is not None:
@@ -154,6 +202,7 @@ class Binding:
                     await self.send_control({'type':'listen_close','session':session,
                                              'reason':'realtime_busy'})
                 return True  # never dispatch a second consumer for this wake
+            if self.paired is not None and self.session!=session and self.paired.identity is not None:self.paired.revoke()
             self.session, self.data_ws = session, self.device.data_ws
             self.owned_once = True
             # Receipt/control reader must remain free while wake waits for the
@@ -204,6 +253,7 @@ class Binding:
         if self.closed:
             return
         self.closed = True
+        if self.paired is not None:self.paired.revoke()
         task = self.wake_task
         if task and task is not asyncio.current_task():
             task.cancel()
