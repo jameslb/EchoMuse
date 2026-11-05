@@ -4,6 +4,7 @@ Clock mapping bounds software-observation age; it does not certify acoustic age.
 The real binding supplies link/lease/mute checks. No factory enables this today.
 """
 from dataclasses import replace
+import asyncio
 import time
 from em_paired_codec import Context,Receiver,HEADER,MAGIC,WIRE_BYTES,CAPABILITY
 
@@ -17,6 +18,7 @@ class PairedInput:
         self.ready_received=None
         self.last_frame=None
         self.last_session=None;self.expected_session=None
+        self.changed=asyncio.Event()
 
     def _check(self):
         now=self.clock()
@@ -84,16 +86,38 @@ class PairedInput:
         except ValueError:
             if self.receiver.closed:self.revoke()
             raise
+        self.changed.set()
         return True
 
+    async def wait_available(self):
+        self.changed.clear()
+        if self.retired or (self.receiver is not None and self.receiver.pending):return
+        try:
+            async with asyncio.timeout(.01):await self.changed.wait()
+        except TimeoutError:pass  # recheck privacy/lease even if input disappears
+
     def pop(self):
+        item=self.pop_with_time()
+        return None if item is None else item[1:]
+
+    def checkpoint(self):
+        """Recheck real privacy/lease state after an awaited DSP/backend step."""
+        return self._check()
+
+    def pop_with_time(self):
+        """Include conservative host observation time, never acoustic age."""
         now=self._check()
         if self.receiver is None:return None
-        try:return self.receiver.pop(now_ns=now-self.offset)
+        captured=(self.receiver.pending[0][0]+self.offset
+                  if self.receiver.pending else None)
+        try:
+            item=self.receiver.pop(now_ns=now-self.offset)
+            return None if item is None else (captured,*item)
         except (PermissionError,ValueError):self.revoke();raise
 
     def revoke(self):
         self.retired=True
+        self.changed.set()
         if self.receiver is not None:self.receiver.close()
 
     def rearm_for_wake(self,session):

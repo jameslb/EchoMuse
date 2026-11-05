@@ -60,3 +60,29 @@ model runtime, live DSP consumption/fault policy and physical qualification are
 not supplied by these hooks. No model files, recordings, private config or
 runtime dependencies are included here. No downloads, installation, service
 restart or room audio ran for this implementation.
+# Cached-runtime consumer integration — 2026-11-04
+
+The companion home-voice-stack staged route now consumes paired input via a
+bounded child-process DSP worker, with explicit pre-wake preparation. The device
+gate and controller registration defaults remain OFF; no bootstrap selects it.
+No firmware/device code changed in this integration.
+
+`PairedInput.pop_with_time()` preserves conservative host observation time for
+post-inference checks; `checkpoint()` rechecks real privacy/lease authority.
+`wait_available()` wakes a consumer on accepted input or retirement. The data
+dispatcher yields after an accepted paired frame: otherwise five already-buffered
+native periods fill the four-period queue before the consumer can run. A regression
+first rejected the fifth period, then passed with one in DSP/four queued, without
+increasing queue capacity. Overflow, gap and age rejection stay intact.
+
+The companion implementation rejects output after ownership/lease/privacy loss,
+preserves the oldest observation age across partial20ms packets, never feeds
+original mono in parallel, and closes input/output on DSP failure. It does not
+manufacture completion receipts or silently retry/rearm a context.
+
+Offline proof used the existing CPython3.12 controller image and a CPython3.11
+child copied only from the already-cached approved runtime image, with networking
+disabled. Four retained-D cases match previous hardware-region PCM exactly;
+native bursts produce1000 correctly sized Conversation.audio input packets per20s case. All children
+were reaped and disposable test containers removed. This is not a cold-speech,
+physical latency, ARM-runtime or deployment qualification.

@@ -78,6 +78,26 @@ class PairTests(unittest.IsolatedAsyncioTestCase):
         for seq in range(5):
             self.pair.frame(self.frame(seq));self.assertIsNotNone(self.pair.pop())
         self.assertFalse(self.pair.retired)
+
+    async def test_dispatch_yields_to_notified_consumer_before_fifth_period(self):
+        await self.ready()
+        started=asyncio.Event()
+        async def consumer():
+            await self.pair.wait_available()
+            self.assertIsNotNone(self.pair.pop())
+            started.set()
+        task=asyncio.create_task(consumer())
+        await asyncio.sleep(0)  # consumer is waiting before the native burst
+        binding=object.__new__(rt.Binding);binding.paired=self.pair
+        async def close():pass
+        binding.close=close
+        try:
+            accepted=[await binding.paired_frame(self.frame(i)) for i in range(5)]
+            self.assertEqual(accepted,[True]*5)
+            self.assertTrue(started.is_set())
+            self.assertEqual(len(self.pair.receiver.pending),4)
+        finally:
+            task.cancel();await asyncio.gather(task,return_exceptions=True)
     async def test_only_new_wake_can_explicitly_rearm_after_retirement(self):
         await self.ready();self.pair.frame(self.frame());self.pair.revoke()
         with self.assertRaises(PermissionError):self.pair.rearm_for_wake(9)

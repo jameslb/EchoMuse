@@ -87,7 +87,14 @@ class Binding:
 
     async def paired_frame(self,packet):
         if self.paired is None:return False
-        try:return self.paired.frame(packet)
+        try:
+            accepted=self.paired.frame(packet)
+            if accepted:
+                # A native batch has five periods. Wake the bounded consumer
+                # before draining another already-buffered websocket packet:
+                # one period in DSP plus four queued, never a larger queue.
+                await asyncio.sleep(0)
+            return accepted
         except (ValueError,PermissionError,BufferError):
             if self.paired.retired:await self.close()
             return False
