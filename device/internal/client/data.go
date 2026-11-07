@@ -1249,9 +1249,13 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			diagPre := mono
 			diagInputFormat := "gained_s16"
 			diagSelected := d.beam.OutputChannel(beamAngle)
-			var diagMics [][]float32
+			var diagMics, diagLoopbacks [][]float32
 			var diagFilter aec.FilterDiagnostic
 			diagPrecision := d.AECProbe.Active() && d.AECProbe.PrecisionActive()
+			diagReference := d.AECProbe.ReferenceActive()
+			if diagReference {
+				diagLoopbacks = beamformer.LoopbackChannelsFloat(raw)
+			}
 
 			// AEC — subtract the speaker's own output before anything
 			// measures or gates the signal. No-op while aecEnabled=false.
@@ -1370,7 +1374,11 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 						metadata.FilterGeneration, metadata.FilterHWFrames = diagFilter.Generation, diagFilter.HardwareFrames
 						metadata.FilterDomain, metadata.FilterLoadStatus = diagFilter.Domain, diagFilter.LoadStatus
 						metadata.FilterLoadSHA256, metadata.FilterLoadBytes = diagFilter.LoadSHA256, diagFilter.LoadBytes
-						d.AECProbe.Capture(metadata, diagPre, diagPost, echoRef, mono, diagMics)
+						if diagReference {
+							d.AECProbe.Capture(metadata, diagPre, diagPost, echoRef, mono, diagMics, diagLoopbacks)
+						} else {
+							d.AECProbe.Capture(metadata, diagPre, diagPost, echoRef, mono, diagMics)
+						}
 					} else {
 						d.AECProbe.Capture(metadata, diagPre, diagPost, echoRef, mono)
 					}

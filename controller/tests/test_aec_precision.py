@@ -19,6 +19,17 @@ def readback(capability=3, scope='one-dot-aec-fullprecision'):
 
 
 class PrecisionReadiness(unittest.TestCase):
+    def test_reference_integrity_is_distinct_from_precision(self):
+        raw=readback(scope='one-dot-aec-reference-integrity')
+        self.assertFalse(validate_aec_readiness(raw)['ready'])
+        lines=raw.splitlines();state=json.loads(lines[6]);state['reference_integrity_version']=4
+        lines[6]=json.dumps(state)
+        result=validate_aec_readiness('\n'.join(lines))
+        self.assertTrue(result['ready'])
+        self.assertEqual(result['maximum_loopback_bytes'],2_560_000)
+        self.assertEqual(result['maximum_microphone_bytes'],8_960_000)
+        self.assertEqual(validate_aec_readiness(readback())['maximum_loopback_bytes'],0)
+
     def test_new_scope_requires_capability_and_reports_exact_bounds(self):
         result=validate_aec_readiness(readback())
         self.assertTrue(result['ready'])
