@@ -469,6 +469,28 @@ func MicChannelsFloat(raw []byte) [][]float32 {
 	return out
 }
 
+// LoopbackChannelsFloat is diagnostic-only. It preserves both electrical
+// playback channels; it never selects or modifies the AEC reference.
+func LoopbackChannelsFloat(raw []byte) [][]float32 {
+	if len(raw) == 0 || len(raw)%frameSize != 0 {
+		return nil
+	}
+	n := len(raw) / frameSize
+	storage := make([]float32, 2*n)
+	out := [][]float32{storage[:n], storage[n:]}
+	for ch := 0; ch < 2; ch++ {
+		for i := 0; i < n; i++ {
+			base := i*frameSize + (7+ch)*byteSample
+			v := int32(raw[base]) | int32(raw[base+1])<<8 | int32(raw[base+2])<<16
+			if v&0x800000 != 0 {
+				v |= ^int32(0xffffff)
+			}
+			out[ch][i] = float32(v) / 256
+		}
+	}
+	return out
+}
+
 // hfEnergy returns the mean squared HF energy for direction di.
 // hfChannels is indexed 0–5 by direction (matching decodeChannels output),
 // not by ALSA channel number — directionToChannel maps direction→channel

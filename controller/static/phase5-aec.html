@@ -3,7 +3,7 @@
 <title>Phase 5 saved AEC diagnostic</title>
 <style>body{font:16px system-ui;max-width:42rem;margin:3rem auto;padding:1rem;background:#18201c;color:#eee}input,button{font:inherit;padding:.6rem;margin:.5rem 0}label{display:block}#status{white-space:pre-wrap}</style></head>
 <body><h1>Saved AEC diagnostic</h1>
-<p>Download the completed private capture from this device. This does not start recording or playback. Close its console first. A separately permitted full-precision capture includes seven raw microphone channels and filter-load metadata; its download is bounded to 11.5 MB.</p>
+<p>Download the completed private capture from this device. This does not start recording or playback. Close its console first. Full-precision captures contain seven microphone channels. A separate reference-integrity permit also retains both playback loopback channels; its download is bounded to 14 MB.</p>
 <label for="device">Device ID from the dashboard</label><input id="device" autocomplete="off" spellcheck="false">
 <button id="check">Check capture readiness</button>
 <button id="download">Download saved capture</button><p id="status" role="status"></p>
@@ -29,7 +29,7 @@ async function request(readiness) {
       headers: {Authorization: 'Bearer ' + token}, signal: abort.signal, cache: 'no-store'});
     if (!response.ok) throw new Error('Export failed (HTTP ' + response.status + '). No automatic retry.');
     const blob = await response.blob();
-    if (blob.size === 0 || blob.size > (readiness ? 4096 : 11500000)) throw new Error('Invalid response size.');
+    if (blob.size === 0 || blob.size > (readiness ? 4096 : 14000000)) throw new Error('Invalid response size.');
     const receipt = readiness ? JSON.parse(await blob.text()) : null;
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');

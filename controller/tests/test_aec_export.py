@@ -47,6 +47,35 @@ def fixture():
 
 
 class TransferTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reference_export_requires_exact_scope_channel_map_and_finite_sidecar(self):
+        import struct
+        for fault in (None,'scope','map','shape','hash','nan','range'):
+            with self.subTest(fault=fault):
+                files=fixture();m=json.loads(files['capture.local.json'])
+                microphones=struct.pack('<f',1.0/256)*320*7
+                raw=struct.pack('<ff',-1.0/256,1.0/256)*320
+                if fault=='shape':raw=raw[:-4]
+                if fault=='nan':raw=struct.pack('<f',float('nan'))*640
+                if fault=='range':raw=struct.pack('<f',32768)*640
+                m.update(version=4,scope='one-dot-aec-reference-integrity',
+                    channels=['selected_gain_monitor','selected_post_aec','hardware_reference'],
+                    microphone_format='float32-le-s16-units',microphone_channels=7,
+                    microphone_sha256=hashlib.sha256(microphones).hexdigest(),
+                    initial_signal_history_captured=False,learned_filter_bytes_captured=False,
+                    loopback_format='float32-le-s16-units',loopback_channels=[7,8],
+                    loopback_sha256=hashlib.sha256(raw).hexdigest())
+                if fault=='scope':m['scope']='one-dot-aec-fullprecision'
+                if fault=='map':m['loopback_channels']=[8,7]
+                if fault=='hash':m['loopback_sha256']='0'*64
+                files.update({'microphones.f32le':microphones,'loopbacks.f32le':raw,
+                              'capture.local.json':json.dumps(m).encode()})
+                if fault:
+                    with self.assertRaises(ValueError):await module._aec_archive(Shell(files))
+                else:
+                    packed=await module._aec_archive(Shell(files))
+                    with zipfile.ZipFile(io.BytesIO(packed)) as z:
+                        self.assertEqual(z.read('loopbacks.f32le'),raw)
+
     async def test_precision_archive_requires_complete_hashed_finite_input(self):
         import struct
         files=fixture();manifest=json.loads(files['capture.local.json'])

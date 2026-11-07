@@ -21,6 +21,8 @@ import (
 const Root = "/data/local/tmp/phase5-aec.local"
 const MaxSamples = 20 * 16000
 const PrecisionScope = "one-dot-aec-fullprecision"
+const ReferenceScope = "one-dot-aec-reference-integrity"
+const MaxLoopbackBytes = MaxSamples * 2 * 4
 const MaxPrecisionBytes = MaxSamples * 7 * 4
 const maxBatches = 640
 
@@ -64,23 +66,25 @@ type Meta struct {
 }
 
 type Recorder struct {
-	mu          sync.Mutex
-	active      atomic.Bool
-	used        bool
-	statusPath  string
-	session     uint32
-	stream      [16]byte
-	deadline    time.Time
-	startedNS   int64
-	root        string
-	pcm         []byte
-	precision   bool
-	microphones []byte
-	rows        []Meta
-	limit       int
-	timer       *time.Timer
-	done        chan struct{}
-	err         error
+	mu                 sync.Mutex
+	active             atomic.Bool
+	used               bool
+	statusPath         string
+	session            uint32
+	stream             [16]byte
+	deadline           time.Time
+	startedNS          int64
+	root               string
+	pcm                []byte
+	referenceIntegrity bool
+	loopbacks          []byte
+	precision          bool
+	microphones        []byte
+	rows               []Meta
+	limit              int
+	timer              *time.Timer
+	done               chan struct{}
+	err                error
 }
 
 func (r *Recorder) Active() bool { return r.active.Load() }
@@ -88,6 +92,11 @@ func (r *Recorder) PrecisionActive() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.active.Load() && r.precision
+}
+func (r *Recorder) ReferenceActive() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.active.Load() && r.referenceIntegrity
 }
 func (r *Recorder) Session() uint32 { r.mu.Lock(); defer r.mu.Unlock(); return r.session }
 
@@ -131,7 +140,7 @@ func (r *Recorder) Start(root string, session uint32, stream [16]byte, lease tim
 	var p Permit
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
-	if dec.Decode(&p) != nil || dec.Decode(new(any)) != io.EOF || !p.Approved || (p.Scope != "one-dot-aec-uplink" && p.Scope != PrecisionScope) || p.MaximumSeconds < 1 || p.MaximumSeconds > 20 || p.ExpiresAt <= now.Unix() || p.ExpiresAt > now.Unix()+300 {
+	if dec.Decode(&p) != nil || dec.Decode(new(any)) != io.EOF || !p.Approved || (p.Scope != "one-dot-aec-uplink" && p.Scope != PrecisionScope && p.Scope != ReferenceScope) || p.MaximumSeconds < 1 || p.MaximumSeconds > 20 || p.ExpiresAt <= now.Unix() || p.ExpiresAt > now.Unix()+300 {
 		return errors.New("invalid or expired diagnostic permit")
 	}
 	if err = os.Rename(path, filepath.Join(root, "permit.used.local.json")); err != nil {
@@ -146,7 +155,11 @@ func (r *Recorder) Start(root string, session uint32, stream [16]byte, lease tim
 	}
 	r.root, r.session, r.stream = root, session, stream
 	r.limit = p.MaximumSeconds * 16000
-	r.precision = p.Scope == PrecisionScope
+	r.referenceIntegrity = p.Scope == ReferenceScope
+	r.precision = p.Scope == PrecisionScope || r.referenceIntegrity
+	if r.referenceIntegrity {
+		r.loopbacks = make([]byte, 0, r.limit*8)
+	}
 	if r.precision {
 		r.microphones = make([]byte, 0, r.limit*28)
 	}
@@ -196,11 +209,23 @@ func (r *Recorder) Capture(m Meta, pre, post, ref, dsp []byte, microphones ...[]
 		return
 	}
 	if r.precision {
-		if len(microphones) != 1 || len(microphones[0]) != 7 || !validFilterMeta(m) {
+		groups := 1
+		if r.referenceIntegrity {
+			groups = 2
+		}
+		if len(microphones) != groups || len(microphones[0]) != 7 || !validFilterMeta(m) {
 			r.stopLocked("invalid_precision_batch")
 			return
 		}
-		for _, channel := range microphones[0] {
+		if r.referenceIntegrity && len(microphones[1]) != 2 {
+			r.stopLocked("invalid_reference_batch")
+			return
+		}
+		channels := microphones[0]
+		if r.referenceIntegrity {
+			channels = append(append([][]float32(nil), channels...), microphones[1]...)
+		}
+		for _, channel := range channels {
 			if len(channel) != n {
 				r.stopLocked("invalid_precision_batch")
 				return
@@ -233,6 +258,13 @@ func (r *Recorder) Capture(m Meta, pre, post, ref, dsp []byte, microphones ...[]
 			}
 		}
 	}
+	if r.referenceIntegrity {
+		for i := 0; i < n; i++ {
+			for ch := 0; ch < 2; ch++ {
+				r.loopbacks = binary.LittleEndian.AppendUint32(r.loopbacks, math.Float32bits(microphones[1][ch][i]))
+			}
+		}
+	}
 	for i := 0; i < n*2; i += 2 {
 		r.pcm = append(r.pcm, pre[i], pre[i+1], post[i], post[i+1])
 		if m.RefValid {
@@ -262,13 +294,14 @@ func (r *Recorder) stopLocked(reason string) {
 	if r.timer != nil {
 		r.timer.Stop()
 	}
-	pcm, rows, microphones := r.pcm, r.rows, r.microphones
+	pcm, rows, microphones, loopbacks := r.pcm, r.rows, r.microphones, r.loopbacks
+	r.loopbacks = nil
 	r.pcm, r.rows = nil, nil
 	r.microphones = nil
 	ended := Stamp()
 	// Only this single bounded write can be outstanding, even if disk stalls.
 	go func() {
-		err := r.save(pcm, rows, microphones, reason, ended)
+		err := r.save(pcm, rows, microphones, loopbacks, reason, ended)
 		r.mu.Lock()
 		r.err = err
 		close(r.done)
@@ -290,7 +323,7 @@ func exclusive(path string, data []byte) error {
 	}
 	return c
 }
-func (r *Recorder) save(pcm []byte, rows []Meta, microphones []byte, reason string, ended int64) error {
+func (r *Recorder) save(pcm []byte, rows []Meta, microphones []byte, loopbacks []byte, reason string, ended int64) error {
 	var events bytes.Buffer
 	enc := json.NewEncoder(&events)
 	for _, m := range rows {
@@ -323,6 +356,20 @@ func (r *Recorder) save(pcm []byte, rows []Meta, microphones []byte, reason stri
 		summary["microphone_sha256"] = hex.EncodeToString(sum[:])
 		summary["initial_signal_history_captured"] = false
 		summary["learned_filter_bytes_captured"] = false
+	}
+	if r.referenceIntegrity {
+		if len(loopbacks) > MaxLoopbackBytes || len(loopbacks) != len(pcm)/6*8 {
+			return errors.New("reference output outside bounds")
+		}
+		if err := exclusive(filepath.Join(r.root, "loopbacks.f32le"), loopbacks); err != nil {
+			return err
+		}
+		sum := sha256.Sum256(loopbacks)
+		summary["version"] = 4
+		summary["scope"] = ReferenceScope
+		summary["loopback_format"] = "float32-le-s16-units"
+		summary["loopback_channels"] = []int{7, 8}
+		summary["loopback_sha256"] = hex.EncodeToString(sum[:])
 	}
 	raw, err := json.Marshal(summary)
 	if err != nil {
